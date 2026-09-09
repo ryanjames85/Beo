@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -35,6 +35,9 @@ jobs:
 
       - name: Typecheck frontend
         run: npm run build --if-present
+
+      - name: Frontend tests
+        run: npm test
 
       - name: Rust fmt check
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check

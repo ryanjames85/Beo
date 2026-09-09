@@ -181,3 +181,118 @@ process) rather than being silently scoped into this pass.
 
 Full rationale and file-level detail: see the review in conversation, or ask
 to regenerate this from the plan.
+
+---
+
+# Second batch: frontend tests, daily update check, Vite upgrade, avd.rs split
+
+First commit landed and is pushed to GitHub (`ryanjames85/Beo`). This batch
+follows a second honest review: zero frontend test coverage, `npm audit`
+flagging Vite/esbuild (dev-only, but unpatched), and `avd.rs` having grown
+to 1086 lines. No code signing being pursued — updates stay check-and-link
+only, but should also run automatically once a day, not just on demand.
+
+## Phase 1 — Vite v5 → v8 upgrade ✅ done (2026-09-09)
+- [x] Bumped `vite` to `^8.2.2`, `@vitejs/plugin-react` to `^6.1.1`
+- [x] `npm audit` clean afterward (was 2 moderate/high, both dev-only)
+- [x] Verified live: `npm run build`, standalone `vite` dev server, and a
+      full real `tauri dev` session (compiled, launched, real `invoke()`
+      calls against the real backend, correct device data rendered) —
+      not just "it installed."
+
+## Phase 2 — Frontend test coverage (Vitest + Testing Library) ✅ done (2026-09-09)
+- [x] Added vitest 5 + @testing-library/react 16 + jsdom — note: jsdom
+      **30.x** has an engine range (`^24.15.0`) narrower than this
+      machine's actual Node (24.14.0) and warns/risks breaking; pinned
+      jsdom to **29.1.1** instead (`>=24.0.0`, actually satisfied). CI's
+      `setup-node` bumped from 20→22 for the same reason (jsdom 29 wants
+      `^22.13.0` within the 22 line).
+- [x] `test`/`test:watch` scripts; `vite.config.ts` gained a `test` block
+      (jsdom env, `src/test/setup.ts` for jest-dom matchers + RTL's
+      `afterEach(cleanup)` — the latter isn't automatic and its absence
+      caused every component test file's later tests to see prior tests'
+      still-mounted DOM and fail with "found multiple elements," caught
+      immediately on first run).
+- [x] 35 tests total: pure-logic tests for `sanitizeAvdName`,
+      `containsBlockedWord`, `recommendedImage`, `isNetworkError`
+      (App.tsx — all now exported for testing), `isNewerVersion`
+      (Settings.tsx), `formatMb` (DeviceCard.tsx); component tests for
+      `DeviceCard` (Stopped/Starting/Running, action-button gating, real
+      disk/RAM display) and `CreateDeviceForm` (Simple vs. Developer,
+      `NameHint` validation states).
+- [x] Verified the tests actually catch regressions, not just pass:
+      temporarily disabled `recommendedImage`'s preview-build exclusion
+      regex — the exact fixture test built from the real `android-37.0`
+      incident failed immediately, correctly, then passed again once
+      reverted.
+- [x] Wired `npm test` into `ci.yml` alongside `cargo test`, same matrix.
+
+## Phase 3 — Daily automatic update check ✅ done (2026-09-09)
+- [x] Moved update-check state/logic (`GITHUB_REPO`/`GITHUB_URL`,
+      `checkForUpdates`, `openReleasePage`, `version`/`versionError`/
+      `updateCheck`/`copyLinkHint`) from `Settings.tsx` up to `App.tsx`;
+      `Settings` is now a pure props consumer (`isNewerVersion` and the
+      `UpdateCheck` type stay exported from `Settings.tsx` since they're
+      pure/type-only and `Settings.test.ts` already depends on that path).
+- [x] `beo-last-update-check` timestamp in localStorage; a `useEffect`
+      keyed on `version` fires `checkForUpdates()` once on mount if the
+      stored timestamp is missing or >24h old, then records a fresh one —
+      same check function, same error handling as the manual button.
+- [x] Quiet dashboard indicator: a small `.status-dot` badge on the header
+      Settings button (title also updates to name the version) when
+      `updateCheck.status === "available"` — no popup/banner; the manual
+      "Check for updates" button in Settings is unchanged.
+- [x] Verified live via CDP against a real `tauri dev` session: injected a
+      fetch mock via `Page.addScriptToEvaluateOnNewDocument` (so it's in
+      place before the app's own mount effect runs — an initial attempt
+      that mocked `fetch` *after* reload lost the race with the real
+      effect and gave a false negative) with a cleared timestamp, reloaded,
+      and confirmed the background check ran unprompted, the timestamp was
+      recorded, the badge appeared on the Settings button, and opening
+      Settings showed the full "Update available: v99.0.0" detail sourced
+      from the lifted App-level state.
+
+## Phase 4 — Split `avd.rs` (1086 lines) into a directory module ✅ done (2026-09-09)
+- [x] `avd/{mod,naming,profiles,rotation,snapshots,lifecycle}.rs` —
+      mechanical, no behavior/signature changes, tests moved with their code
+      (33/33 unchanged). `naming.rs` (sanitize/blocklist), `profiles.rs`
+      (device profiles + `category_for_device_id`), `rotation.rs`
+      (rotate_avd + its parser), `snapshots.rs` (CRUD + parser),
+      `lifecycle.rs` (the core: AvdInfo, list/create/delete/launch/stop_avd,
+      disk/RAM lookups, `find_serial_for_avd`). `avd/mod.rs` declares the
+      submodules and re-exports.
+- [x] **Non-obvious compile gotcha:** `#[tauri::command]` leaves a hidden
+      `__cmd__<name>` helper item next to each command function in its
+      *defining* module, and `generate_handler!` in `lib.rs` looks that up
+      at the same path given for the command itself (`avd::list_avds`
+      implies `avd::__cmd__list_avds` must also exist). A named re-export
+      (`pub(crate) use lifecycle::{list_avds, ...}`) only re-exports the
+      function, not its hidden companion, and fails with `E0433` for every
+      single command — fixed by using glob re-exports
+      (`pub(crate) use lifecycle::*;` etc.) in `avd/mod.rs` instead. Worth
+      remembering for any future module split involving `#[tauri::command]`
+      functions: always glob-import, never name individual commands.
+- [x] Cross-submodule internals (`sanitize_avd_name`, `category_for_device_id`,
+      `find_serial_for_avd`) made `pub(super)` — visible throughout `avd`,
+      not the whole crate, since nothing outside `avd` needs them.
+- [x] Verified: `cargo check`/`cargo test` (33/33, same tests, now living
+      next to the code they test) clean; `cargo clippy -D warnings` and
+      `cargo fmt --check` both clean. Live smoke-tested the full lifecycle
+      through the real compiled binary via CDP against a throwaway AVD:
+      `create_avd` → `launch_avd` → (wait for real boot) → `rotate_avd`
+      (landscape then back to portrait) → `save_snapshot` →
+      `list_snapshots` → `delete_snapshot` → `stop_avd` → `delete_avd`, all
+      succeeded identically to pre-split behavior.
+- **Found, unrelated to this split:** `launch_avd`'s `-no-clipboard-sharing`
+  flag is no longer accepted by the current emulator binary (37.1.11.0,
+  auto-updated by `sdkmanager` since it was last checked) —
+  `unknown option: -no-clipboard-sharing / please use -help for a list of
+  valid options`. Confirmed via `emulator -help-all` that the flag is gone
+  from this build. Only affects launching with clipboard sharing turned
+  *off* (the Settings toggle default is on, so most users won't hit it).
+  Not fixed as part of this phase (out of scope — a pre-existing behavior
+  bug, not a refactor regression) — needs its own pass to find the current
+  equivalent flag (if any) or handle its absence gracefully.
+
+Full rationale and file-level detail: see `C:\Users\ryan\.claude\plans\lucky-tumbling-candy.md`
+or the plan approved in conversation.

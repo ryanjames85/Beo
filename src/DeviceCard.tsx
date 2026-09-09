@@ -13,7 +13,7 @@ export type SnapshotInfo = { name: string; size: string; date: string };
 // even one snapshot easily runs into multiple GB (confirmed by hand: 11 GB
 // for one phone with a single boot snapshot), so GB is the common case,
 // not the exception.
-function formatMb(mb: number): string {
+export function formatMb(mb: number): string {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }
 

@@ -1,3 +1,5 @@
+use super::naming::sanitize_avd_name;
+use super::profiles::category_for_device_id;
 use crate::util::{adb_bin, android_tool, cmdline_tools_bin, emulator_bin};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -19,120 +21,6 @@ pub struct AvdBootedEvent {
     name: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct DeviceProfile {
-    id: String,
-    label: String,
-    category: String, // "phone" or "tablet"
-}
-
-/// Lists Android Studio's own built-in hardware profiles (Pixel phones,
-/// tablets, Nexus devices, Wear, TV, etc.) via `avdmanager list device`,
-/// so the picker matches what Android Studio itself offers rather than
-/// a hardcoded subset.
-#[tauri::command]
-pub(crate) fn list_device_profiles() -> Result<Vec<DeviceProfile>, String> {
-    let out = android_tool(cmdline_tools_bin("avdmanager"))
-        .args(["list", "device", "-c"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let ids = String::from_utf8_lossy(&out.stdout);
-
-    let profiles = ids
-        .lines()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|id| !id.contains("wear") && !id.contains("tv") && !id.contains("automotive"))
-        .map(|id| {
-            let label = id
-                .split('_')
-                .map(|w| {
-                    let mut c = w.chars();
-                    match c.next() {
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            DeviceProfile {
-                category: category_for_device_id(&id).to_string(),
-                id,
-                label,
-            }
-        })
-        .collect();
-    Ok(profiles)
-}
-
-/// Pulls the rotation out of `dumpsys window`'s `Display{#0 ...
-/// ROTATION_n}` line and converts it to a `Surface.ROTATION_*` index
-/// (0-3). `n` here is a *degree* value (0/90/180/270 — confirmed live:
-/// after one `adb emu rotate` from a fresh portrait boot, `dumpsys window`
-/// reported `ROTATION_270`, not `ROTATION_1`), not the enum's own integer
-/// value, so this has to parse the full number and divide by 90 rather
-/// than read a single digit — a single-digit read only happens to work
-/// for `ROTATION_0`, and silently misreads 90/180/270 (e.g. reading just
-/// the leading "2" of "270" as rotation index 2, i.e. 180°). Caught by a
-/// fixture test built from that same real captured "270" line — split out
-/// from `current_rotation` so it can be unit tested without a live device.
-fn parse_rotation(text: &str) -> Option<u8> {
-    text.lines().find_map(|line| {
-        let idx = line.find("Display{#0")?;
-        let after = &line[idx..];
-        let tag = "ROTATION_";
-        let start = after.find(tag)? + tag.len();
-        let digits: String = after[start..]
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        let degrees: u32 = digits.parse().ok()?;
-        Some(((degrees / 90) % 4) as u8)
-    })
-}
-
-/// Reads the display's current rotation (0-3, `Surface.ROTATION_*`) out of
-/// `dumpsys window`'s `Display{#0 ... ROTATION_n}` line.
-fn current_rotation(serial: &str) -> Result<u8, String> {
-    let out = android_tool(adb_bin())
-        .args(["-s", serial, "shell", "dumpsys", "window"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    parse_rotation(&text).ok_or_else(|| "Couldn't read the current display rotation".to_string())
-}
-
-/// Rotates a running device between portrait and landscape via the
-/// emulator console's own `rotate` command (reached through `adb emu`) —
-/// the same mechanism Android Studio's Extended Controls panel uses. This
-/// simulates a real physical rotation via the virtual sensor, unlike
-/// `settings put system user_rotation`, which real Android silently
-/// overrides whenever the foreground activity has a fixed orientation (as
-/// the launcher and most first-run/onboarding screens do) or auto-rotate
-/// is on — confirmed live: the settings-only approach never visibly
-/// rotated anything, while `emu rotate` does immediately. It only rotates
-/// 90° clockwise per call (relative, not absolute), so this reads the
-/// current rotation first and issues however many calls are needed to
-/// reach the requested orientation.
-#[tauri::command]
-pub(crate) fn rotate_avd(name: String, orientation: String) -> Result<String, String> {
-    let serial = find_serial_for_avd(&name)?;
-    let target: u8 = if orientation == "landscape" { 1 } else { 0 };
-    let current = current_rotation(&serial)?;
-    let steps = (target as i32 - current as i32).rem_euclid(4);
-    for _ in 0..steps {
-        let out = android_tool(adb_bin())
-            .args(["-s", &serial, "emu", "rotate"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(150));
-    }
-    Ok(format!("Rotated to {orientation}"))
-}
-
 // camelCase here specifically, matching IdeIntegrationStatus's own comment
 // on the same lesson: this struct has multi-word fields, and without
 // rename_all serde sends disk_usage_mb/ram_mb (snake_case) while the
@@ -151,17 +39,6 @@ pub struct AvdInfo {
     // partition was actually using 11G on disk, mostly a boot snapshot.
     disk_usage_mb: Option<u64>,
     ram_mb: Option<u32>,
-}
-
-/// Same "does the device profile id look like a tablet" heuristic as
-/// `list_device_profiles` — kept in sync with it deliberately, since a
-/// profile picked there is what ends up here after `create_avd`.
-fn category_for_device_id(device_id: &str) -> &'static str {
-    if device_id.contains("tablet") || device_id.contains("pad") {
-        "tablet"
-    } else {
-        "phone"
-    }
 }
 
 /// `avdmanager list avd -c` (the machine-readable form used before) only
@@ -323,51 +200,6 @@ pub(crate) fn list_avds() -> Result<Vec<AvdInfo>, String> {
             avd
         })
         .collect())
-}
-
-/// avdmanager only accepts `[A-Za-z0-9._-]` in AVD names — anything else
-/// (spaces, emoji, punctuation) either gets rejected outright or produces a
-/// device whose on-disk name silently diverges from what was typed. Beo's
-/// "name it anything" UX promises free-text input, so this maps that input
-/// into a valid name instead of forwarding it as-is to the CLI.
-pub(crate) fn sanitize_avd_name(raw: &str) -> Result<String, String> {
-    let mut out = String::with_capacity(raw.len());
-    let mut last_was_underscore = false;
-    for c in raw.trim().chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
-            out.push(c);
-            last_was_underscore = c == '_';
-        } else if !last_was_underscore {
-            out.push('_');
-            last_was_underscore = true;
-        }
-    }
-    let trimmed = out.trim_matches('_').to_string();
-    let truncated: String = trimmed.chars().take(60).collect();
-    if truncated.is_empty() {
-        return Err("Device name needs at least one letter or number.".into());
-    }
-    if contains_blocked_word(&truncated) {
-        return Err("That name isn't allowed — please choose something else.".into());
-    }
-    Ok(truncated)
-}
-
-// Deliberately small and word-boundary-matched rather than a substring scan
-// — a substring check would block innocent names for containing a bad
-// word as a fragment (e.g. "classic" contains "ass"), which is the classic
-// failure mode of naive profanity filters. Checked against whole tokens of
-// the *sanitized* name (already split on any non [A-Za-z0-9._-] character),
-// so "bad_word" is checked as ["bad", "word"], not as one long string.
-const BLOCKED_WORDS: &[&str] = &[
-    "fuck", "shit", "bitch", "asshole", "cunt", "nigger", "nigga", "faggot", "retard", "whore",
-    "slut", "dick", "piss", "cock", "pussy", "bastard",
-];
-
-pub(crate) fn contains_blocked_word(sanitized_name: &str) -> bool {
-    sanitized_name
-        .split(|c: char| !c.is_ascii_alphanumeric())
-        .any(|token| BLOCKED_WORDS.contains(&token.to_ascii_lowercase().as_str()))
 }
 
 #[tauri::command]
@@ -740,7 +572,7 @@ fn running_avd_serials() -> Result<Vec<(String, String)>, String> {
     Ok(result)
 }
 
-fn find_serial_for_avd(name: &str) -> Result<String, String> {
+pub(super) fn find_serial_for_avd(name: &str) -> Result<String, String> {
     running_avd_serials()?
         .into_iter()
         .find(|(running_name, _)| running_name == name)
@@ -782,108 +614,6 @@ pub(crate) fn stop_avd(name: String) -> Result<String, String> {
     Ok(format!("Stopped {name}"))
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct SnapshotInfo {
-    name: String,
-    size: String,
-    date: String,
-}
-
-/// Lists snapshots via `adb emu avd snapshot list`, which prints a
-/// fixed-width text table (confirmed by hand: "ID   TAG   VM SIZE   DATE
-/// VM CLOCK", terminated by "OK") rather than anything structured — this
-/// parses that table by position rather than assuming exact column widths,
-/// since sdkmanager/emulator table output isn't a stable contract across
-/// versions (see list_available_images for the same concern elsewhere).
-/// Split out from `list_snapshots` so it can be unit tested against a real
-/// captured `emu avd snapshot list` dump without needing a live device.
-fn parse_snapshot_list(text: &str) -> Vec<SnapshotInfo> {
-    text.lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            // Real rows look like: "--  mysnap  1.4M  2026-09-04  21:34:45  00:10:07.753"
-            // — at least ID, TAG, SIZE, DATE, TIME. Header/footer/blank
-            // lines won't have that shape (header's ID column literally
-            // reads "ID", which parts[0] == "--" filters out).
-            if parts.len() < 5 || parts[0] != "--" {
-                return None;
-            }
-            Some(SnapshotInfo {
-                name: parts[1].to_string(),
-                size: parts[2].to_string(),
-                date: format!("{} {}", parts[3], parts[4]),
-            })
-        })
-        .collect()
-}
-
-#[tauri::command]
-pub(crate) fn list_snapshots(name: String) -> Result<Vec<SnapshotInfo>, String> {
-    let serial = find_serial_for_avd(&name)?;
-    let out = android_tool(adb_bin())
-        .args(["-s", &serial, "emu", "avd", "snapshot", "list"])
-        .output()
-        .map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    Ok(parse_snapshot_list(&text))
-}
-
-#[tauri::command]
-pub(crate) fn save_snapshot(name: String, snapshot_name: String) -> Result<String, String> {
-    let serial = find_serial_for_avd(&name)?;
-    let safe = sanitize_avd_name(&snapshot_name)?;
-    let out = android_tool(adb_bin())
-        .args(["-s", &serial, "emu", "avd", "snapshot", "save", &safe])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !String::from_utf8_lossy(&out.stdout).contains("OK") {
-        return Err(String::from_utf8_lossy(&out.stdout).to_string());
-    }
-    Ok(format!("Saved snapshot \"{safe}\""))
-}
-
-#[tauri::command]
-pub(crate) fn load_snapshot(name: String, snapshot_name: String) -> Result<String, String> {
-    let serial = find_serial_for_avd(&name)?;
-    let out = android_tool(adb_bin())
-        .args([
-            "-s",
-            &serial,
-            "emu",
-            "avd",
-            "snapshot",
-            "load",
-            &snapshot_name,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !String::from_utf8_lossy(&out.stdout).contains("OK") {
-        return Err(String::from_utf8_lossy(&out.stdout).to_string());
-    }
-    Ok(format!("Loaded snapshot \"{snapshot_name}\""))
-}
-
-#[tauri::command]
-pub(crate) fn delete_snapshot(name: String, snapshot_name: String) -> Result<String, String> {
-    let serial = find_serial_for_avd(&name)?;
-    let out = android_tool(adb_bin())
-        .args([
-            "-s",
-            &serial,
-            "emu",
-            "avd",
-            "snapshot",
-            "delete",
-            &snapshot_name,
-        ])
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !String::from_utf8_lossy(&out.stdout).contains("OK") {
-        return Err(String::from_utf8_lossy(&out.stdout).to_string());
-    }
-    Ok(format!("Deleted snapshot \"{snapshot_name}\""))
-}
-
 #[tauri::command]
 pub(crate) fn install_apk(apk_path: String) -> Result<String, String> {
     let out = android_tool(adb_bin())
@@ -899,68 +629,6 @@ pub(crate) fn install_apk(apk_path: String) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sanitize_avd_name_replaces_disallowed_chars() {
-        assert_eq!(sanitize_avd_name("My tablet").unwrap(), "My_tablet");
-        assert_eq!(
-            sanitize_avd_name("weird name!! @@ ##").unwrap(),
-            "weird_name"
-        );
-    }
-
-    #[test]
-    fn sanitize_avd_name_collapses_runs_and_trims_edges() {
-        // '.', '-', '_' are all allowed characters, so only leading/trailing
-        // *underscores* get trimmed — a leading/trailing '.' is left as-is,
-        // since it's just as valid mid-name as at the edges.
-        assert_eq!(sanitize_avd_name("  __leading").unwrap(), "leading");
-        assert_eq!(sanitize_avd_name("trailing__  ").unwrap(), "trailing");
-        assert_eq!(sanitize_avd_name("a   b").unwrap(), "a_b");
-    }
-
-    #[test]
-    fn sanitize_avd_name_allows_dots_dashes_underscores() {
-        assert_eq!(
-            sanitize_avd_name("my.device-1_test").unwrap(),
-            "my.device-1_test"
-        );
-    }
-
-    #[test]
-    fn sanitize_avd_name_rejects_empty_result() {
-        assert!(sanitize_avd_name("!!! @@@ ###").is_err());
-        assert!(sanitize_avd_name("   ").is_err());
-    }
-
-    #[test]
-    fn sanitize_avd_name_truncates_to_60_chars() {
-        let long = "a".repeat(100);
-        assert_eq!(sanitize_avd_name(&long).unwrap().len(), 60);
-    }
-
-    #[test]
-    fn sanitize_avd_name_blocks_profanity_after_sanitizing() {
-        // "shit device" sanitizes to "shit_device" before the blocklist
-        // check runs — this confirms the check happens on the sanitized
-        // form, not the raw input.
-        assert!(sanitize_avd_name("fuck_this").is_err());
-        assert!(sanitize_avd_name("shit device").is_err());
-    }
-
-    #[test]
-    fn contains_blocked_word_matches_whole_tokens_only() {
-        assert!(contains_blocked_word("fuck_device"));
-        assert!(contains_blocked_word("my_shit_phone"));
-        assert!(!contains_blocked_word("classic_assistant")); // contains "ass" as a substring, not a token
-        assert!(!contains_blocked_word("my_tablet"));
-    }
-
-    #[test]
-    fn contains_blocked_word_is_case_insensitive() {
-        assert!(contains_blocked_word("FUCK"));
-        assert!(contains_blocked_word("FuCk_device"));
-    }
 
     // Real `avdmanager list avd` output, captured live from this machine's
     // actual SDK install (2026-09-09) — including a broken entry (its
@@ -991,64 +659,6 @@ mod tests {
                     category: "phone".into(),
                     disk_usage_mb: None,
                     ram_mb: None,
-                },
-            ]
-        );
-    }
-
-    // Real `dumpsys window` fragments, captured live: the first while
-    // verifying the rotate_avd fix (device still portrait), the second
-    // moments later after issuing `adb emu rotate` (now landscape).
-    #[test]
-    fn parse_rotation_reads_portrait() {
-        let text = "    Display{#0 state=ON size=1080x2400 ROTATION_0}:\n      more stuff here";
-        assert_eq!(parse_rotation(text), Some(0));
-    }
-
-    #[test]
-    fn parse_rotation_reads_landscape_after_rotating() {
-        let text = "    Display{#0 state=ON size=2400x1080 ROTATION_270}:\n      more stuff here";
-        assert_eq!(parse_rotation(text), Some(3));
-    }
-
-    #[test]
-    fn parse_rotation_returns_none_without_a_display_line() {
-        assert_eq!(parse_rotation("nothing relevant here\njust noise"), None);
-    }
-
-    // Real `adb emu avd snapshot list` output, captured live: first with
-    // only the emulator's own auto-created `default_boot` snapshot, then
-    // again after saving one through Beo (`fixture_test`) — confirming the
-    // parser handles more than one real row, not just a single-row sample.
-    const REAL_SNAPSHOT_LIST_EMPTY: &str = "List of snapshots present on all disks:\nID        TAG                 VM SIZE                DATE       VM CLOCK\n--        default_boot            75M 2026-09-09 11:41:45   00:10:07.753\nOK\n";
-    const REAL_SNAPSHOT_LIST_WITH_SAVE: &str = "List of snapshots present on all disks:\nID        TAG                 VM SIZE                DATE       VM CLOCK\n--        default_boot            75M 2026-09-09 11:41:45   00:10:07.753\n--        fixture_test            75M 2026-09-09 16:55:38   00:10:45.114\nOK\n";
-
-    #[test]
-    fn parse_snapshot_list_reads_the_auto_created_boot_snapshot() {
-        assert_eq!(
-            parse_snapshot_list(REAL_SNAPSHOT_LIST_EMPTY),
-            vec![SnapshotInfo {
-                name: "default_boot".into(),
-                size: "75M".into(),
-                date: "2026-09-09 11:41:45".into(),
-            }]
-        );
-    }
-
-    #[test]
-    fn parse_snapshot_list_reads_multiple_rows_after_a_save() {
-        assert_eq!(
-            parse_snapshot_list(REAL_SNAPSHOT_LIST_WITH_SAVE),
-            vec![
-                SnapshotInfo {
-                    name: "default_boot".into(),
-                    size: "75M".into(),
-                    date: "2026-09-09 11:41:45".into(),
-                },
-                SnapshotInfo {
-                    name: "fixture_test".into(),
-                    size: "75M".into(),
-                    date: "2026-09-09 16:55:38".into(),
                 },
             ]
         );

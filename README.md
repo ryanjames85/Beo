@@ -1,6 +1,6 @@
 # Beo
 
-*Beo* (Irish, "alive") — a clean, open-source Android emulator manager and
+*Beo*  A clean, open-source Android emulator manager and
 installer. No bundled adware, no gaming-emulator cruft, no IDE required.
 
 ## Why
@@ -129,7 +129,7 @@ already done.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+[PolyForm Shield 1.0.0](LICENSE) — free to use for any purpose, including commercially. You may not redistribute it as a competing product.
 
 ## Contributing
 
@@ -139,3 +139,6 @@ reviewing carefully before relying on it. See `CONTRIBUTING.md` for where
 things live and what to test before opening a PR.
 
 Repo: https://github.com/ryanjames85/Beo
+
+
+*Built in Ireland.Shipped with care.*

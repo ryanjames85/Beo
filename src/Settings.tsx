@@ -1,15 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getVersion } from "@tauri-apps/api/app";
-import { open } from "@tauri-apps/plugin-shell";
 import { applyTheme, getStoredTheme, type Theme } from "./theme";
 
 type IdeStatus = { enabled: boolean; sdkPath: string; shellProfile: string | null };
 
-const GITHUB_REPO = "ryanjames85/Beo";
-const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
-
-type UpdateCheck =
+export type UpdateCheck =
   | { status: "idle" }
   | { status: "checking" }
   | { status: "up-to-date" }
@@ -19,7 +14,7 @@ type UpdateCheck =
 // Numeric semver-ish comparison ("1.2.10" > "1.2.9", unlike a plain string
 // compare) — good enough for this app's own version scheme without pulling
 // in a full semver library for one comparison.
-function isNewerVersion(latest: string, current: string): boolean {
+export function isNewerVersion(latest: string, current: string): boolean {
   const toParts = (v: string) => v.split(".").map((p) => parseInt(p, 10) || 0);
   const a = toParts(latest);
   const b = toParts(current);
@@ -35,11 +30,25 @@ export default function Settings({
   mode,
   devMode,
   onResetApp,
+  githubUrl,
+  version,
+  versionError,
+  updateCheck,
+  copyLinkHint,
+  checkForUpdates,
+  openReleasePage,
 }: {
   onClose: () => void;
   mode: "simple" | "developer";
   devMode: boolean;
   onResetApp: () => void;
+  githubUrl: string;
+  version: string | null;
+  versionError: boolean;
+  updateCheck: UpdateCheck;
+  copyLinkHint: string | null;
+  checkForUpdates: () => void;
+  openReleasePage: (url: string) => void;
 }) {
   const [status, setStatus] = useState<IdeStatus | null>(null);
   const [busy, setBusy] = useState(false);
@@ -47,10 +56,6 @@ export default function Settings({
   const [connectedIdes, setConnectedIdes] = useState<string[]>([]);
   const [clipboard, setClipboard] = useState(() => localStorage.getItem("beo-clipboard") !== "off");
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
-  const [version, setVersion] = useState<string | null>(null);
-  const [versionError, setVersionError] = useState(false);
-  const [updateCheck, setUpdateCheck] = useState<UpdateCheck>({ status: "idle" });
-  const [copyLinkHint, setCopyLinkHint] = useState<string | null>(null);
 
   useEffect(() => {
     invoke<IdeStatus>("ide_integration_status").then(setStatus);
@@ -58,102 +63,6 @@ export default function Settings({
     const interval = setInterval(refreshConnections, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  useEffect(() => {
-    // No .catch() here previously meant a rejected getVersion() (unlikely,
-    // but possible — an IPC hiccup, a stripped permission) left `version`
-    // null forever with the "Check for updates" button silently disabled
-    // and no way to tell why. Now it's an explicit, visible state instead.
-    getVersion()
-      .then(setVersion)
-      .catch(() => setVersionError(true));
-  }, []);
-
-  // No auto-updater wired up (that needs a signing keypair — deliberately
-  // deferred) — this only checks GitHub's latest release against the
-  // running version and, if newer, opens the release page for a manual
-  // download. Every failure mode (network down, repo/releases not public
-  // yet, a malformed response) surfaces as a real message instead of
-  // silently doing nothing, since a "Check for updates" button that can
-  // fail invisibly is worse than no button at all.
-  async function checkForUpdates() {
-    if (!version) return;
-    setUpdateCheck({ status: "checking" });
-    let res: Response;
-    try {
-      res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
-    } catch {
-      // fetch() itself only throws for network-layer failures (offline, DNS,
-      // TLS, CORS) — genuinely "couldn't reach GitHub at all."
-      setUpdateCheck({
-        status: "error",
-        message: "Couldn't reach GitHub to check for updates — check your internet connection and try again.",
-      });
-      return;
-    }
-
-    if (res.status === 404) {
-      // GitHub returns 404 both when the repo has no releases yet *and*
-      // when the repo/owner name is simply wrong — can't tell which from
-      // the status code alone, so the message doesn't overclaim either way.
-      setUpdateCheck({
-        status: "error",
-        message:
-          "No release found — either this repository has no published releases yet, or the repository name is wrong.",
-      });
-      return;
-    }
-    if (res.status === 403 || res.status === 429) {
-      setUpdateCheck({
-        status: "error",
-        message: "GitHub is rate-limiting update checks from this network right now — try again in a few minutes.",
-      });
-      return;
-    }
-    if (!res.ok) {
-      setUpdateCheck({ status: "error", message: `GitHub returned an unexpected response (${res.status}).` });
-      return;
-    }
-
-    let data: unknown;
-    try {
-      data = await res.json();
-    } catch {
-      setUpdateCheck({ status: "error", message: "GitHub's response wasn't valid JSON — try again later." });
-      return;
-    }
-    if (typeof data !== "object" || data === null) {
-      setUpdateCheck({ status: "error", message: "GitHub's response wasn't in the expected format." });
-      return;
-    }
-
-    const record = data as Record<string, unknown>;
-    const latest = String(record.tag_name ?? "").replace(/^v/, "");
-    const url = typeof record.html_url === "string" ? record.html_url : GITHUB_URL;
-    if (!latest) {
-      setUpdateCheck({ status: "error", message: "GitHub's response didn't include a version tag." });
-      return;
-    }
-
-    if (isNewerVersion(latest, version)) {
-      setUpdateCheck({ status: "available", version: latest, url });
-    } else {
-      setUpdateCheck({ status: "up-to-date" });
-    }
-  }
-
-  async function openReleasePage(url: string) {
-    setCopyLinkHint(null);
-    try {
-      await open(url);
-    } catch {
-      // The shell plugin call itself failed (not just "browser didn't
-      // launch") — leaving this silent would mean clicking the button
-      // visibly does nothing with no explanation. Give the user the raw
-      // link to copy instead of a dead end.
-      setCopyLinkHint(url);
-    }
-  }
 
   async function refreshConnections() {
     try {
@@ -349,7 +258,7 @@ export default function Settings({
             </p>
           )}
           <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-            <button onClick={() => openReleasePage(GITHUB_URL)} title="View source, issues, and releases on GitHub">
+            <button onClick={() => openReleasePage(githubUrl)} title="View source, issues, and releases on GitHub">
               View on GitHub
             </button>
             <button
@@ -389,7 +298,7 @@ export default function Settings({
               <button
                 className="primary"
                 style={{ marginTop: "6px" }}
-                onClick={() => openReleasePage(updateCheck.status === "available" ? updateCheck.url : GITHUB_URL)}
+                onClick={() => openReleasePage(updateCheck.status === "available" ? updateCheck.url : githubUrl)}
               >
                 Open release page
               </button>

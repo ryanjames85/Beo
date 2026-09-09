@@ -2,7 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import Settings from "./Settings";
+import { open as openUrl } from "@tauri-apps/plugin-shell";
+import { getVersion } from "@tauri-apps/api/app";
+import Settings, { isNewerVersion, type UpdateCheck } from "./Settings";
 import DeviceCard, { type AvdInfo, type SnapshotInfo } from "./DeviceCard";
 import CreateDeviceForm, { type Category, type DeviceProfile } from "./CreateDeviceForm";
 
@@ -33,6 +35,10 @@ type DiskSpaceStatus = { availableMb: number | null };
 const LOW_DISK_SPACE_MB = 8192;
 type FailedAction = { kind: "install" } | { kind: "create"; name: string; imageId: string; device: string };
 
+const GITHUB_REPO = "ryanjames85/Beo";
+const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
 // sdkmanager/reqwest error text varies by platform and failure mode, but
 // these substrings show up across the common transient-network cases
 // (dropped connection, DNS failure, timeout) — used to show a plain-language
@@ -49,7 +55,7 @@ const NETWORK_ERROR_PATTERNS = [
   "no route to host",
 ];
 
-function isNetworkError(raw: string): boolean {
+export function isNetworkError(raw: string): boolean {
   const lower = raw.toLowerCase();
   return NETWORK_ERROR_PATTERNS.some((p) => lower.includes(p));
 }
@@ -132,7 +138,7 @@ const VERIFIED_API_LEVELS = [36, 35, 34];
 // levels (36.1, 37.0, 37.2-beta1) the same way, via the same reasoning:
 // Google marks preview/beta channels with a decimal version rather than a
 // plain integer (34, 35, 36) or an extension suffix (34-ext10).
-function recommendedImage(images: string[], abi: string): string | undefined {
+export function recommendedImage(images: string[], abi: string): string | undefined {
   const playstore = images.filter((img) => img.includes("google_apis_playstore"));
   const matchingAbi = (pool: string[]) => {
     const withAbi = pool.filter((img) => img.endsWith(`;${abi}`));
@@ -201,6 +207,10 @@ export default function App() {
   const [newSnapshotName, setNewSnapshotName] = useState<Record<string, string>>({});
   const [snapshotBusy, setSnapshotBusy] = useState<string | null>(null);
   const [lastFailed, setLastFailed] = useState<FailedAction | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
+  const [versionError, setVersionError] = useState(false);
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck>({ status: "idle" });
+  const [copyLinkHint, setCopyLinkHint] = useState<string | null>(null);
 
   function toggleDevMode() {
     const next = !devMode;
@@ -309,6 +319,93 @@ export default function App() {
     }
   }
 
+  // No auto-updater wired up (that needs a signing keypair — deliberately
+  // deferred) — this only checks GitHub's latest release against the
+  // running version and, if newer, opens the release page for a manual
+  // download. Every failure mode (network down, repo/releases not public
+  // yet, a malformed response) surfaces as a real message instead of
+  // silently doing nothing. Lives here (not in Settings) so the daily
+  // background check below can run for the whole app lifetime, not just
+  // while the Settings screen happens to be mounted.
+  async function checkForUpdates() {
+    if (!version) return;
+    setUpdateCheck({ status: "checking" });
+    let res: Response;
+    try {
+      res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/releases/latest`);
+    } catch {
+      // fetch() itself only throws for network-layer failures (offline, DNS,
+      // TLS, CORS) — genuinely "couldn't reach GitHub at all."
+      setUpdateCheck({
+        status: "error",
+        message: "Couldn't reach GitHub to check for updates — check your internet connection and try again.",
+      });
+      return;
+    }
+
+    if (res.status === 404) {
+      // GitHub returns 404 both when the repo has no releases yet *and*
+      // when the repo/owner name is simply wrong — can't tell which from
+      // the status code alone, so the message doesn't overclaim either way.
+      setUpdateCheck({
+        status: "error",
+        message:
+          "No release found — either this repository has no published releases yet, or the repository name is wrong.",
+      });
+      return;
+    }
+    if (res.status === 403 || res.status === 429) {
+      setUpdateCheck({
+        status: "error",
+        message: "GitHub is rate-limiting update checks from this network right now — try again in a few minutes.",
+      });
+      return;
+    }
+    if (!res.ok) {
+      setUpdateCheck({ status: "error", message: `GitHub returned an unexpected response (${res.status}).` });
+      return;
+    }
+
+    let data: unknown;
+    try {
+      data = await res.json();
+    } catch {
+      setUpdateCheck({ status: "error", message: "GitHub's response wasn't valid JSON — try again later." });
+      return;
+    }
+    if (typeof data !== "object" || data === null) {
+      setUpdateCheck({ status: "error", message: "GitHub's response wasn't in the expected format." });
+      return;
+    }
+
+    const record = data as Record<string, unknown>;
+    const latest = String(record.tag_name ?? "").replace(/^v/, "");
+    const url = typeof record.html_url === "string" ? record.html_url : GITHUB_URL;
+    if (!latest) {
+      setUpdateCheck({ status: "error", message: "GitHub's response didn't include a version tag." });
+      return;
+    }
+
+    if (isNewerVersion(latest, version)) {
+      setUpdateCheck({ status: "available", version: latest, url });
+    } else {
+      setUpdateCheck({ status: "up-to-date" });
+    }
+  }
+
+  async function openReleasePage(url: string) {
+    setCopyLinkHint(null);
+    try {
+      await openUrl(url);
+    } catch {
+      // The shell plugin call itself failed (not just "browser didn't
+      // launch") — leaving this silent would mean clicking the button
+      // visibly does nothing with no explanation. Give the user the raw
+      // link to copy instead of a dead end.
+      setCopyLinkHint(url);
+    }
+  }
+
   async function doRetry() {
     if (!lastFailed) return;
     setLog("");
@@ -323,7 +420,28 @@ export default function App() {
     invoke<boolean>("sdk_status").then((ok) => setView(ok ? "dashboard" : "setup"));
     checkNetwork();
     checkJava();
+    // No .catch() here previously meant a rejected getVersion() (unlikely,
+    // but possible — an IPC hiccup, a stripped permission) left `version`
+    // null forever with the "Check for updates" button silently disabled
+    // and no way to tell why. Now it's an explicit, visible state instead.
+    getVersion()
+      .then(setVersion)
+      .catch(() => setVersionError(true));
   }, []);
+
+  // A daily background check so a new release surfaces without the user
+  // having to remember to open Settings and click the button — same
+  // check, same error handling, just triggered by a stale timestamp
+  // instead of a click. Runs once `version` is known (checkForUpdates is a
+  // no-op without it) rather than on every render.
+  useEffect(() => {
+    if (!version) return;
+    const last = Number(localStorage.getItem("beo-last-update-check") ?? 0);
+    if (Date.now() - last < UPDATE_CHECK_INTERVAL_MS) return;
+    localStorage.setItem("beo-last-update-check", String(Date.now()));
+    checkForUpdates();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [version]);
 
   // A stuck/looping boot doesn't error — try_wait() in launch_avd only
   // catches an almost-instant crash, not a boot that just never finishes.
@@ -698,7 +816,21 @@ export default function App() {
   }
 
   if (view === "settings") {
-    return <Settings onClose={() => setView("dashboard")} mode={mode} devMode={devMode} onResetApp={doResetApp} />;
+    return (
+      <Settings
+        onClose={() => setView("dashboard")}
+        mode={mode}
+        devMode={devMode}
+        onResetApp={doResetApp}
+        githubUrl={GITHUB_URL}
+        version={version}
+        versionError={versionError}
+        updateCheck={updateCheck}
+        copyLinkHint={copyLinkHint}
+        checkForUpdates={checkForUpdates}
+        openReleasePage={openReleasePage}
+      />
+    );
   }
 
   if (view === "setup") {
@@ -789,8 +921,18 @@ export default function App() {
           >
             Debug
           </button>
-          <button onClick={() => setView("settings")} title="App settings and preferences">
+          <button
+            onClick={() => setView("settings")}
+            title={updateCheck.status === "available" ? `Update available: v${updateCheck.version}` : "App settings and preferences"}
+            style={{ position: "relative" }}
+          >
             Settings
+            {updateCheck.status === "available" && (
+              <span
+                className="status-dot on"
+                style={{ position: "absolute", top: 2, right: 2 }}
+              />
+            )}
           </button>
           <button
             className="danger"
