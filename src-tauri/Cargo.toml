@@ -1,0 +1,27 @@
+[package]
+name = "beo"
+version = "0.1.0"
+description = "Beo — open-source Android emulator manager and installer"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "5"
+zip = "2"
+reqwest = { version = "0.12", features = ["blocking", "stream"] }
+futures-util = "0.3"
+tokio = { version = "1", features = ["full"] }
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.10"
+
+[lib]
+name = "beo_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
