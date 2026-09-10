@@ -203,6 +203,33 @@ pub(crate) fn emit_progress(app: &AppHandle, stage: &str, percent: Option<f64>, 
     );
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DataPaths {
+    data_root: String,
+    avd_root: String,
+}
+
+/// Surfaces both real on-disk locations Beo actually writes to — shown in
+/// Settings for transparency. These are genuinely two separate places, not
+/// one: `data_root()` (SDK, system images, Beo's own JDK) is Beo's own
+/// directory, but `avdmanager` creates devices under the standard Android
+/// tooling location (`~/.android/avd`) regardless — a detail that's easy
+/// to miss (it's exactly what made the original `nuke_all` incomplete,
+/// see below) and worth being upfront about rather than only describing
+/// "Beo's data" as a single, singular place.
+#[tauri::command]
+pub(crate) fn data_paths() -> DataPaths {
+    let avd_root = dirs::home_dir()
+        .map(|h| h.join(".android").join("avd"))
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "~/.android/avd".into());
+    DataPaths {
+        data_root: data_root().to_string_lossy().to_string(),
+        avd_root,
+    }
+}
+
 /// Wipes the entire persistent SDK/system-image data dir *and* the actual
 /// AVD devices — the "nuke" button.
 ///

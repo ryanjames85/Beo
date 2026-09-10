@@ -196,6 +196,7 @@ export default function App() {
   const [accel, setAccel] = useState<{ available: boolean; backend: string; detail: string } | null>(null);
   const [devMode, setDevMode] = useState(() => localStorage.getItem("beo-devmode") === "on");
   const [debugLog, setDebugLog] = useState<DebugEntry[]>([]);
+  const [debugLogCopied, setDebugLogCopied] = useState(false);
   const [abi, setAbi] = useState<string>("x86_64");
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
   const [diskSpaceMb, setDiskSpaceMb] = useState<number | null>(null);
@@ -226,6 +227,8 @@ export default function App() {
   function copyDebugLog() {
     const text = debugLog.map((e) => `[${e.time}] ${e.message}`).join("\n");
     navigator.clipboard.writeText(text);
+    setDebugLogCopied(true);
+    setTimeout(() => setDebugLogCopied(false), 1500);
   }
 
   function fail(context: string, e: unknown, retry?: FailedAction) {
@@ -477,6 +480,18 @@ export default function App() {
     if (view === "dashboard") refresh();
   }, [view]);
 
+  // A success message ("Created X", "Installed on Y") used to sit in the
+  // log block indefinitely — until the *next* action overwrote it — which
+  // reads as stale, stuck-feeling UI for something that already happened
+  // and needs no further attention. An error paired with a Retry button
+  // (lastFailed set) still needs to stay put, since the user has to act on
+  // it; only the no-action-needed case fades on its own.
+  useEffect(() => {
+    if (!log || lastFailed) return;
+    const timer = setTimeout(() => setLog(""), 4000);
+    return () => clearTimeout(timer);
+  }, [log, lastFailed]);
+
   function switchMode(next: Mode) {
     setMode(next);
     localStorage.setItem("beo-mode", next);
@@ -689,7 +704,7 @@ export default function App() {
     logDebug(`Installing ${path} on "${name}"`);
     setInstallingApk(name);
     try {
-      const result = await invoke<string>("install_apk", { apkPath: path });
+      const result = await invoke<string>("install_apk", { name, apkPath: path });
       logDebug(`Install result for "${name}": ${result || "OK"}`);
       setLog(`Installed on ${name}.`);
     } catch (e) {
@@ -1109,7 +1124,7 @@ export default function App() {
           <div className="debug-header">
             <p className="section-label" style={{ margin: 0 }}>Debug log</p>
             <button onClick={copyDebugLog} title="Copy the full debug log to your clipboard">
-              Copy
+              {debugLogCopied ? "Copied!" : "Copy"}
             </button>
           </div>
           <pre className="log debug-log">

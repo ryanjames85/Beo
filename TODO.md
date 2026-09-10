@@ -412,3 +412,60 @@ lands.
       deb targets already declared in `tauri.conf.json`, just need release
       workflow coverage) and verify install/launch/uninstall by hand on
       each, same discipline as the Windows NSIS verification above.
+
+---
+
+# Fourth batch: small UX polish, transparency, and IDE detection
+
+## Done (2026-09-10)
+- [x] **`detect_connected_ides` expanded** from just Android Studio/VS Code
+      to also check for IntelliJ IDEA and Zed (both confirmed live against
+      real running processes on this machine — `idea64.exe`, `Zed.exe`),
+      plus Cursor, Windsurf, WebStorm, PyCharm, Neovim, Notepad++, and
+      Google Antigravity by their documented/standard process names (none
+      of those seven installed here, so unconfirmed live — flagged as such
+      in code comments).
+- [x] **New "Data & storage" section in Settings** — new `data_paths`
+      command (`util.rs`) surfaces both real on-disk locations Beo writes
+      to: its own app data dir (SDK/images/JDK) and the separate standard
+      `~/.android/avd` location `avdmanager` actually uses for devices —
+      called out explicitly as two different places, for transparency.
+      Both have Copy buttons.
+- [x] **Copy buttons now give feedback.** Every "Copy" button in the app
+      (SDK path, the two new data paths, the debug log) previously wrote
+      to the clipboard with zero visible confirmation — clicking looked
+      like it did nothing. All four now flip to "Copied!" for 1.5s.
+- [x] **`install_apk` now targets a specific device serial** (via
+      `find_serial_for_avd`, the same helper `rotate_avd`/the snapshot
+      commands already use) instead of calling bare `adb install` and
+      trusting whatever device adb defaults to — the one remaining
+      command that didn't disambiguate between multiple running emulators.
+      Verified live: installing onto a named-but-not-running device now
+      correctly fails with "Couldn't find a running emulator for ..."
+      instead of silently trying (and possibly succeeding against the
+      wrong device, or erroring confusingly) via adb's own default.
+- [x] **Success messages in the dashboard's log block now auto-dismiss**
+      after 4 seconds (`"Created X"`, `"Installed on Y"`, etc.) instead of
+      sitting there until the next action overwrites them. An error paired
+      with a Retry button (`lastFailed` set) still persists — only the
+      no-action-needed case fades on its own.
+- All four verified live via CDP against a real standalone release build
+  (`npm run tauri build`, not `--debug`, to avoid the running dev
+  session's locked `target/debug/beo.exe`) — real paths rendering
+  correctly in Data & storage, both the SDK-path and debug-log Copy
+  buttons flipping to "Copied!" and reverting, a validation message
+  appearing then disappearing after ~4s, and the `install_apk` error path
+  confirmed against a real (not-running) device name.
+- **Process note:** killed the user's real active `tauri dev` session by
+  accident mid-verification — `taskkill /IM beo.exe` matched by image name
+  and killed both a test instance and the user's own session, since two
+  processes shared that name. User confirmed no harm (it was disposable),
+  but the lesson stands: target a specific PID when there's any chance
+  another same-named process is running, never kill by image name on this
+  machine without checking first. Also: the standalone test instance
+  wrote `beo-devmode: on` to `localStorage`, which is a shared WebView2
+  profile — the user's own next real launch may show the Debug panel on
+  by default as a result (harmless, one click to turn back off, just
+  worth knowing why it's on).
+- 33/33 Rust tests, clippy, fmt, `tsc --noEmit`, 35/35 frontend tests,
+  and `npm run build` all clean throughout.

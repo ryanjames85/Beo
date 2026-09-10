@@ -630,10 +630,16 @@ pub(crate) fn stop_avd(name: String) -> Result<String, String> {
     Ok(format!("Stopped {name}"))
 }
 
+/// Targets a specific device via `-s <serial>`, same as `rotate_avd`/the
+/// snapshot commands — without this, `adb install` falls back to whatever
+/// device it defaults to (ambiguous, or an outright error, the moment more
+/// than one emulator is running at once), silently installing on the wrong
+/// device rather than the one the user clicked "Install APK" on.
 #[tauri::command]
-pub(crate) fn install_apk(apk_path: String) -> Result<String, String> {
+pub(crate) fn install_apk(name: String, apk_path: String) -> Result<String, String> {
+    let serial = find_serial_for_avd(&name)?;
     let out = android_tool(adb_bin())
-        .args(["install", "-r", &apk_path])
+        .args(["-s", &serial, "install", "-r", &apk_path])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {

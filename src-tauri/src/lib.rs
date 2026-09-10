@@ -48,6 +48,7 @@ pub fn run() {
             avd::install_apk,
             util::nuke_all,
             util::check_disk_space,
+            util::data_paths,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

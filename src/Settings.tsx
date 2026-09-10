@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { applyTheme, getStoredTheme, type Theme } from "./theme";
 
 type IdeStatus = { enabled: boolean; sdkPath: string; shellProfile: string | null };
+type DataPaths = { dataRoot: string; avdRoot: string };
 
 export type UpdateCheck =
   | { status: "idle" }
@@ -56,9 +57,11 @@ export default function Settings({
   const [connectedIdes, setConnectedIdes] = useState<string[]>([]);
   const [clipboard, setClipboard] = useState(() => localStorage.getItem("beo-clipboard") !== "off");
   const [theme, setTheme] = useState<Theme>(() => getStoredTheme());
+  const [dataPaths, setDataPaths] = useState<DataPaths | null>(null);
 
   useEffect(() => {
     invoke<IdeStatus>("ide_integration_status").then(setStatus);
+    invoke<DataPaths>("data_paths").then(setDataPaths);
     refreshConnections();
     const interval = setInterval(refreshConnections, 5000);
     return () => clearInterval(interval);
@@ -89,8 +92,25 @@ export default function Settings({
     }
   }
 
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Clicking Copy previously gave no feedback at all — the text landed on
+  // the clipboard, but nothing on screen changed, so there was no way to
+  // tell it worked short of pasting somewhere. Flashing the button's own
+  // label to "Copied!" for a moment is the smallest fix that removes that
+  // doubt, reused across every Copy button in this file via one key.
+  function copyText(key: string, text: string) {
+    navigator.clipboard.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1500);
+  }
+
   function copyPath() {
-    if (status) navigator.clipboard.writeText(status.sdkPath);
+    if (status) copyText("sdk", status.sdkPath);
+  }
+
+  function copyDataPath(key: string, path: string) {
+    copyText(key, path);
   }
 
   function toggleClipboard() {
@@ -176,13 +196,13 @@ export default function Settings({
           <div className="path-row">
             <code className="path-value">{status?.sdkPath ?? "…"}</code>
             <button onClick={copyPath} title="Copy the full SDK path to your clipboard">
-              Copy
+              {copiedKey === "sdk" ? "Copied!" : "Copy"}
             </button>
           </div>
 
           <p className="feature-intro" style={{ marginTop: "12px" }}>
             {status?.enabled
-              ? "ANDROID_HOME is set in your shell profile. Any IDE launched from a terminal will pick it up."
+              ? "ANDROID_HOME is set and pointed at this SDK."
               : "Set ANDROID_HOME so IDEs and terminals can find this SDK automatically."}
           </p>
           <button
@@ -191,12 +211,18 @@ export default function Settings({
             onClick={toggleIde}
             title={
               status?.enabled
-                ? "Removes ANDROID_HOME from your shell profile"
+                ? "Removes ANDROID_HOME"
                 : "Sets ANDROID_HOME so other tools can find this SDK"
             }
           >
             {busy ? "Working…" : status?.enabled ? "Disable IDE integration" : "Enable IDE integration"}
           </button>
+
+          {msg && (
+            <div className="accel-warning" style={{ marginTop: "10px" }}>
+              <p className="accel-detail">{msg}</p>
+            </div>
+          )}
 
           <p className="section-label" style={{ marginTop: "16px" }}>Currently connected</p>
           {connectedIdes.length > 0 ? (
@@ -221,8 +247,6 @@ export default function Settings({
         </div>
       </section>
 
-      {msg && <p className="hint">{msg}</p>}
-
       {devMode && (
         <section>
           <p className="section-label">Debug</p>
@@ -243,6 +267,45 @@ export default function Settings({
           </div>
         </section>
       )}
+
+      <section>
+        <p className="section-label">Data &amp; storage</p>
+        <div className="feature-card" style={{ textAlign: "left" }}>
+          <p className="feature-intro">
+            Everything Beo writes to disk, in plain sight — nothing hidden,
+            nothing phoned home. These are two separate locations: your
+            devices don't live inside Beo's own folder.
+          </p>
+
+          <p className="section-label" style={{ marginTop: "12px" }}>App data (SDK, images, JDK)</p>
+          <div className="path-row">
+            <code className="path-value">{dataPaths?.dataRoot ?? "…"}</code>
+            <button
+              onClick={() => dataPaths && copyDataPath("dataRoot", dataPaths.dataRoot)}
+              title="Copy the full app data path to your clipboard"
+            >
+              {copiedKey === "dataRoot" ? "Copied!" : "Copy"}
+            </button>
+          </div>
+
+          <p className="section-label" style={{ marginTop: "12px" }}>Virtual devices (AVDs)</p>
+          <div className="path-row">
+            <code className="path-value">{dataPaths?.avdRoot ?? "…"}</code>
+            <button
+              onClick={() => dataPaths && copyDataPath("avdRoot", dataPaths.avdRoot)}
+              title="Copy the full AVD path to your clipboard"
+            >
+              {copiedKey === "avdRoot" ? "Copied!" : "Copy"}
+            </button>
+          </div>
+          <p className="hint" style={{ marginTop: "8px" }}>
+            This is the standard Android tooling location, not a Beo-specific
+            one — the same place Android Studio's own Device Manager creates
+            devices. The dashboard's "Nuke all data" button clears both
+            locations.
+          </p>
+        </div>
+      </section>
 
       <section>
         <p className="section-label">About</p>

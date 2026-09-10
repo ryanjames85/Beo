@@ -216,6 +216,55 @@ pub(crate) fn detect_connected_ides() -> Vec<String> {
     {
         found.push("VS Code".to_string());
     }
+    // "idea64.exe" confirmed live on Windows (JetBrains Toolbox and the
+    // standalone installer both use this name); JetBrains' other IDEs
+    // (WebStorm, PyCharm, ...) use their own similarly-named binaries and
+    // aren't covered here — this is specifically IntelliJ IDEA.
+    if text.contains("idea64.exe") || text.contains("idea.exe") || text.contains("intellij idea") {
+        found.push("IntelliJ IDEA".to_string());
+    }
+    // "zed.exe" confirmed live on Windows; macOS/Linux builds run as a bare
+    // "zed" process.
+    if text.contains("zed.exe") || text.contains("zed.app") || text.contains("/zed ") {
+        found.push("Zed".to_string());
+    }
+    // Cursor and Windsurf are VS Code forks with their own process names —
+    // not confirmed live on this machine (neither installed here), based
+    // on their known standard binary names instead.
+    if text.contains("cursor.exe") || text.contains("cursor helper") || text.contains("/cursor ") {
+        found.push("Cursor".to_string());
+    }
+    if text.contains("windsurf.exe")
+        || text.contains("windsurf helper")
+        || text.contains("/windsurf ")
+    {
+        found.push("Windsurf".to_string());
+    }
+    // Same JetBrains platform as IntelliJ IDEA but separate binaries — not
+    // confirmed live here either.
+    if text.contains("webstorm64.exe") || text.contains("webstorm.exe") || text.contains("webstorm")
+    {
+        found.push("WebStorm".to_string());
+    }
+    if text.contains("pycharm64.exe") || text.contains("pycharm.exe") || text.contains("pycharm") {
+        found.push("PyCharm".to_string());
+    }
+    // GUI Neovim front-ends (neovim-qt, Neovide) and a bare terminal
+    // `nvim.exe` both show up under this name — not confirmed live here.
+    if text.contains("nvim.exe") || text.contains("neovide.exe") || text.contains("nvim-qt.exe") {
+        found.push("Neovim".to_string());
+    }
+    // The OG. Not confirmed live here (not installed on this machine), but
+    // "notepad++.exe" has been its process name since forever.
+    if text.contains("notepad++.exe") {
+        found.push("Notepad++".to_string());
+    }
+    // Google's VS Code fork. Not confirmed live here (not installed on
+    // this machine) — guessing at its process name by the same convention
+    // as Cursor/Windsurf until it can be checked against a real install.
+    if text.contains("antigravity.exe") || text.contains("/antigravity ") {
+        found.push("Antigravity".to_string());
+    }
 
     found
 }
