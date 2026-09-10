@@ -1,8 +1,8 @@
 {
   "name": "beo",
-  "version": "0.1.0",
-  "description": "Beo — an open-source, lightweight Android emulator manager and installer. Downloads and manages the official Google SDK command-line tools with no bundled adware.",
-  "license": "MIT",
+  "version": "0.2.0",
+  "description": "Beo — a source-available, lightweight Android emulator manager and installer. Downloads and manages the official Google SDK command-line tools with no bundled adware.",
+  "license": "PolyForm-Shield-1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

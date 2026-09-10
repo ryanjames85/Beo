@@ -1,6 +1,6 @@
 # Beo
 
-*Beo*  A clean, open-source Android emulator manager and
+*Beo*  A clean, source-available Android emulator manager and
 installer. No bundled adware, no gaming-emulator cruft, no IDE required.
 
 ## Why
@@ -41,7 +41,12 @@ npm run tauri build
 ```
 
 Produces NSIS/MSI on Windows, DMG on macOS, AppImage/deb on Linux —
-standard installer UX per platform, per `tauri.conf.json`.
+standard installer UX per platform, per `tauri.conf.json`. **Only Windows
+is currently built and released via CI** (`.github/workflows/release.yml`,
+tag-triggered) — macOS/Linux targets exist in the config and build fine
+locally, but aren't part of the release pipeline yet: they still need a
+real install/launch/uninstall verification pass by hand on each platform
+before shipping through CI, not just a config file declaring the target.
 
 ## How it works
 
@@ -102,14 +107,13 @@ standard installer UX per platform, per `tauri.conf.json`.
    opens the release page for a manual download — no auto-installer yet
    (see roadmap), but every failure mode (no releases published, a
    network error, an unexpected response) shows a real message with a
-   Retry button rather than failing silently.
+   Retry button rather than failing silently. A background check also
+   runs automatically once a day (silently, on app launch) and shows a
+   quiet dot on the Settings button when an update is found — same check,
+   just not something you have to remember to click.
 
 ## Roadmap / open issues
 
-- [ ] Frontend test suite (Rust side has one — `cargo test` in
-      `src-tauri`, covering name sanitization, the profanity filter,
-      progress-percentage parsing, and several real-output-fixture parser
-      tests; nothing on the TypeScript side yet)
 - [ ] `install_apk` doesn't target a specific device serial — fine with
       one emulator running, ambiguous with several at once (`rotate_avd`
       and everything else that talks to a running device already does)
@@ -117,11 +121,18 @@ standard installer UX per platform, per `tauri.conf.json`.
       manual updates over time as new Android versions are released and
       actually confirmed to boot cleanly
 - [ ] Drag-and-drop APK install (currently a file-picker button, not drag-drop)
-- [ ] macOS Gatekeeper quarantine handling on downloaded binaries
-- [ ] CI-built signed releases, and a real in-app auto-updater
-      (`tauri-plugin-updater`) once signing is in place — today's "Check
-      for updates" (Settings → About) only checks and links out to a
-      manual download; see `TODO.md`
+- [ ] macOS/Linux installers — buildable locally, not yet part of the
+      release pipeline (see above); macOS Gatekeeper quarantine handling
+      on downloaded binaries is also unaddressed
+- [ ] Windows releases are built and drafted by CI (`release.yml`) but
+      **not yet code-signed** — the workflow is wired for SignPath.io's
+      free OSS signing program, pending that application being approved.
+      Until then, installers trigger the normal "unknown publisher"
+      SmartScreen warning.
+- [ ] A real in-app auto-updater (`tauri-plugin-updater`, silent
+      download+install) is still deferred — today's update check
+      (Settings → About, plus a daily background check) only compares
+      versions and links out to a manual download; see `TODO.md`
 
 See `TODO.md` for the full PoC → alpha/beta hardening plan (CI, download
 integrity, module structure, test coverage, error handling) and what's
@@ -134,9 +145,9 @@ already done.
 ## Contributing
 
 PRs welcome. This is a young project — the CLI-orchestration core
-(`src-tauri/src/{util,jdk,sdk,avd,ide}.rs`) is the part most worth
-reviewing carefully before relying on it. See `CONTRIBUTING.md` for where
-things live and what to test before opening a PR.
+(`src-tauri/src/{util,jdk,sdk,ide}.rs` and the `avd/` module) is the part
+most worth reviewing carefully before relying on it. See `CONTRIBUTING.md`
+for where things live and what to test before opening a PR.
 
 Repo: https://github.com/ryanjames85/Beo
 

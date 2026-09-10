@@ -296,3 +296,119 @@ only, but should also run automatically once a day, not just on demand.
 
 Full rationale and file-level detail: see `C:\Users\ryan\.claude\plans\lucky-tumbling-candy.md`
 or the plan approved in conversation.
+
+---
+
+# Third batch: first real installer release (Windows, signed via SignPath)
+
+License changed to PolyForm Shield 1.0.0 (from MIT) — `LICENSE`,
+`package.json`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, and the
+in-app About text (`src/Settings.tsx`) all updated to match. This batch turns
+that into a real, distributable installer for the first time — everything
+before this was debug bundles built by hand for e2e testing.
+
+Decisions made with the user: **Windows only** for this first release
+(matches this machine, and the precedent set by the user's other project,
+`development/balla`, which also ships Windows-only); **code signing via
+SignPath.io's free OSS program**, the same approach already proven on
+`balla`'s CI, wired in but gated so it's a no-op until SignPath approval
+lands.
+
+## Done (2026-09-09)
+- [x] **Fixed the `-no-clipboard-sharing` bug** (found during the Phase 4
+      avd.rs-split smoke test above). Confirmed via `emulator -help-all` and
+      the emulator's own `advancedFeatures.ini` (every feature flag it
+      knows about) that clipboard sharing has no command-line control at
+      all anymore in this build (37.1.11.0) — not renamed, not moved to
+      `-feature`, just gone. `launch_avd` (`avd/lifecycle.rs`) no longer
+      passes the dead flag; instead it emits an `avd_log` line explaining
+      that this emulator version can't disable clipboard sharing, and
+      proceeds with it on (the same as leaving the toggle unset) rather
+      than failing the whole launch. Verified live via CDP: launching with
+      `shareClipboard: false` used to fail with `unknown option:
+      -no-clipboard-sharing`; now it launches, boots, and the device shows
+      up on `adb devices` as fully running, same as any normal launch.
+- [x] Installer/package metadata updated to match the license change:
+      `tauri.conf.json`'s `bundle.longDescription`, `package.json`'s and
+      `Cargo.toml`'s `description` fields all changed from "open source" to
+      "source-available ... PolyForm Shield 1.0.0."
+- [x] **Restructured `.github/workflows/release.yml`** from a single
+      3-platform `tauri-action` step into Windows-only `build` → `sign` →
+      `release` jobs: `build` runs a real `tauri build` and uploads the
+      `.msi`/setup `.exe` as workflow artifacts; `sign` downloads them and
+      runs the same `Install-Module SignPath` + `Submit-SigningRequest`
+      PowerShell pattern already proven on `balla`'s GitLab CI (own
+      `ProjectSlug: "beo"`); `release` creates a draft GitHub release via
+      `gh release create` (no extra third-party action) with both files
+      attached. **Real GitHub Actions constraint hit and fixed:** `secrets`
+      can't be referenced in a job-level `if:` (only in `env:`) — so `sign`
+      always runs, and the individual signing step gates on `env.*` instead
+      (checked via a job-level `env:` block sourced from secrets), meaning
+      unconfigured `SIGNPATH_API_TOKEN`/`SIGNPATH_ORG_ID` make the job a
+      clean no-op (installers pass through unsigned) rather than skipping
+      the job entirely or failing it.
+- [x] Version bumped 0.1.0 → 0.2.0 across `package.json`, `Cargo.toml`, and
+      `tauri.conf.json` (regenerated `Cargo.lock`/`package-lock.json`) — this
+      release includes everything since the initial commit (Vite upgrade,
+      frontend tests, daily update check, avd.rs split, the license
+      change), more than a patch's worth of change.
+- [x] **Real local release build and full NSIS install/launch/uninstall
+      cycle, verified by hand, not just configured:**
+      - `npm run tauri build` (real release profile, not `--debug`)
+        succeeded, producing `Beo_0.2.0_x64-setup.exe` and
+        `Beo_0.2.0_x64_en-US.msi`.
+      - **Git Bash gotcha hit while testing:** running the NSIS installer
+        with `/S` (silent) from the Bash tool opened a full GUI installer
+        window instead of installing silently — Git Bash's MSYS layer
+        mangles single-letter `/X`-style flags into path arguments before
+        they ever reach the Windows exe. Switched to `Start-Process
+        -ArgumentList "/S"` in PowerShell (native argument passing, no
+        conversion), which worked correctly. Worth remembering for any
+        future Windows-native-exe flag testing on this machine.
+      - Silently installed via PowerShell (`/S`), confirmed it landed at
+        `%LOCALAPPDATA%\Beo\beo.exe` (per-user, no admin needed) with a
+        real Start Menu shortcut created. Launched `beo.exe` directly,
+        confirmed a real "Beo" window opened and stayed responsive for
+        10+ seconds (not an instant-crash false success, the exact failure
+        mode this project has hit before with `launch_avd` itself).
+        Uninstalled via the generated `uninstall.exe /S`, confirmed both
+        the install directory and the Start Menu shortcut were fully
+        removed afterward.
+- **Found, not fixed — documented instead:** the MSI (`msiexec /qn`) fails
+  with **Error 1925 — insufficient privileges** when installed
+  non-elevated. The WiX-based MSI bundle defaults to a per-machine
+  (all-users) install scope, which requires admin elevation; the NSIS
+  installer defaults to per-user and needs none, which is why it's the
+  installer recommended first in the release notes. This is standard
+  MSI/WiX behavior, not a Beo bug — confirmed via a verbose `/L*v` install
+  log showing the exact WiX error, and confirmed the failed attempt left no
+  partial install behind (`C:\Program Files\Beo` never created, clean
+  rollback). Not fixed in this pass since it needs a decision (elevate to
+  test properly, or set `installPerMachine: false` in the WiX config to
+  make the MSI per-user too) — deferred to a future pass if the MSI turns
+  out to matter enough to a user to justify either.
+
+## Still to do
+- [ ] Push the `v0.2.0` tag to trigger the real `release.yml` run on
+      GitHub's own Windows runner — this is a git push, so per this
+      project's standing rule the user does this themselves, not Claude.
+      Exact commands: `git tag v0.2.0` then `git push origin v0.2.0` (after
+      committing everything above). Once it runs, confirm the draft release
+      appears with both files attached, and download+run the actual GitHub
+      Actions-built artifact (not just the local one) to close the loop —
+      first real confirmation the workflow itself works end to end, not
+      just the local build.
+- [ ] Apply for SignPath's free OSS signing program
+      (https://about.signpath.io/product/open-source) for this repo
+      specifically (own project, separate from `balla`'s) — external,
+      user-driven. Once approved, add `SIGNPATH_API_TOKEN`/
+      `SIGNPATH_ORG_ID` as repo secrets; the workflow already knows what
+      to do with them the moment they exist, no further code changes
+      needed.
+- [ ] macOS/Linux installers — deferred, revisit once there's a way to
+      verify them by hand. **User has a Mac and a Linux VM available for
+      this testing** — when picking this back up, add `macos-latest` and
+      `ubuntu-22.04` legs back to `release.yml`'s `build` job (dmg/appimage/
+      deb targets already declared in `tauri.conf.json`, just need release
+      workflow coverage) and verify install/launch/uninstall by hand on
+      each, same discipline as the Windows NSIS verification above.

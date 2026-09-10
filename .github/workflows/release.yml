@@ -7,42 +7,124 @@ on:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: "macos-latest"
-            args: ""
-          - platform: "ubuntu-22.04"
-            args: ""
-          - platform: "windows-latest"
-            args: ""
-
-    runs-on: ${{ matrix.platform }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Linux system deps
-        if: matrix.platform == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
-
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install frontend deps
         run: npm ci
 
-      - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build release bundle
+        run: npm run tauri build
+
+      - name: Collect and rename installer artifacts
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path src-tauri/target/release/bundle/msi -Filter *.msi -ErrorAction SilentlyContinue | Select-Object -First 1
+          $nsis = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $msi) { throw "No .msi found under src-tauri/target/release/bundle/msi" }
+          if (-not $nsis) { throw "No setup .exe found under src-tauri/target/release/bundle/nsis" }
+          Copy-Item $msi.FullName Beo-windows.msi
+          Copy-Item $nsis.FullName Beo-windows-setup.exe
+
+      - uses: actions/upload-artifact@v4
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Beo ${{ github.ref_name }}"
-          releaseDraft: true
-          prerelease: false
-          args: ${{ matrix.args }}
+          name: installers
+          path: |
+            Beo-windows.msi
+            Beo-windows-setup.exe
+
+  # Signs the installers via SignPath's free OSS code-signing program
+  # (https://about.signpath.io/product/open-source) — the same approach
+  # already proven on this author's other project. Skipped cleanly (not
+  # failed) until SIGNPATH_API_TOKEN/SIGNPATH_ORG_ID are configured as repo
+  # secrets, which only happens once SignPath approves the application —
+  # unsigned builds keep working in the meantime.
+  sign:
+    needs: build
+    runs-on: windows-latest
+    # secrets can't be referenced in a job-level `if:` (GitHub Actions only
+    # allows that in `env:`) — so the job always runs, and the actual
+    # signing step below gates on `env.*`, which step-level `if:` does
+    # allow. Un-configured secrets mean this job does nothing and passes
+    # the artifacts through unsigned, rather than failing the release.
+    env:
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers
+
+      - name: Sign installers via SignPath
+        if: ${{ env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_ORG_ID != '' }}
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable -Name SignPath)) {
+            Install-Module -Name SignPath -Repository PSGallery -Force -Scope CurrentUser
+          }
+          foreach ($artifact in @(
+            @{ In = "Beo-windows-setup.exe"; Out = "Beo-windows-setup.exe" },
+            @{ In = "Beo-windows.msi";       Out = "Beo-windows.msi"       }
+          )) {
+            if (Test-Path $artifact.In) {
+              Submit-SigningRequest `
+                -InputArtifactPath  $artifact.In `
+                -OutputArtifactPath $artifact.Out `
+                -OrganizationId     $env:SIGNPATH_ORG_ID `
+                -CIUserToken        $env:SIGNPATH_API_TOKEN `
+                -ProjectSlug        "beo" `
+                -SigningPolicySlug  "release-signing" `
+                -WaitForCompletion
+            }
+          }
+
+      - name: Note unsigned build
+        if: ${{ env.SIGNPATH_API_TOKEN == '' || env.SIGNPATH_ORG_ID == '' }}
+        shell: pwsh
+        run: Write-Host "SIGNPATH_API_TOKEN/SIGNPATH_ORG_ID not configured yet — shipping unsigned installers."
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: |
+            Beo-windows.msi
+            Beo-windows-setup.exe
+          overwrite: true
+
+  release:
+    needs: [build, sign]
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Written to a file rather than passed inline — PowerShell's
+          # argument passing to a native exe can mangle a multi-line string.
+          @"
+          Windows: run `Beo-windows-setup.exe` (recommended) or `Beo-windows.msi`.
+          The installer upgrades any existing install in place.
+
+          Beo is source-available under PolyForm Shield 1.0.0 — free to use for
+          any purpose, including commercially. See LICENSE.
+          "@ | Set-Content -Encoding utf8 release-notes.md
+
+          gh release create "$env:GITHUB_REF_NAME" `
+            Beo-windows.msi Beo-windows-setup.exe `
+            --title "Beo $env:GITHUB_REF_NAME" `
+            --notes-file release-notes.md `
+            --draft

@@ -56,22 +56,27 @@ module — run all of them with `cargo test --manifest-path src-tauri/Cargo.toml
   downloads, plus the license-acceptance step, check `SdkTask.cancelled`
   so the Cancel button actually works throughout the whole install, not
   just once `sdkmanager` itself is running.
-- `src-tauri/src/avd.rs` — the AVD lifecycle: create/launch/stop/rotate/
-  delete, snapshots, APK sideload, device-profile listing, and the AVD
-  name sanitizer/profanity filter. `avd_dir()` is the one place that
-  resolves an AVD's real on-disk folder — reads it from `<name>.ini`'s
-  `path=` line rather than assuming `<name>.avd`, since those can
-  genuinely differ (confirmed on a real device on this machine). Real
-  per-device disk usage (walking the folder) and RAM (`config.ini`'s
-  `hw.ramSize`, which can carry a K/M/G suffix — `parse_size_to_mb`
-  handles that) are both surfaced through `list_avds`. `launch_avd`
-  rejects a duplicate launch immediately (checked via
-  `find_serial_for_avd`) rather than spawning a second emulator process
-  that the emulator itself would reject a few seconds into startup —
-  confirmed live, that used to report false success. Its boot-completion
-  poll emits both `avd_log` (a text line, for the debug panel) and
-  `avd_booted` (a structured `{name}` event) — the frontend uses the
-  latter to flip a device's dashboard status from "Starting…" to
+- `src-tauri/src/avd/` — the AVD lifecycle, split by responsibility:
+  `naming.rs` (name sanitizer/profanity filter), `profiles.rs` (device
+  profile listing), `rotation.rs` (rotate + rotation parsing),
+  `snapshots.rs` (save/load/delete/list), and `lifecycle.rs` (the core:
+  create/launch/stop/delete, disk/RAM lookups, `find_serial_for_avd`).
+  `mod.rs` just declares the submodules and re-exports — glob re-exports
+  specifically, since `#[tauri::command]` leaves a hidden helper item next
+  to each command function that a named re-export would miss. `avd_dir()`
+  (in `lifecycle.rs`) is the one place that resolves an AVD's real on-disk
+  folder — reads it from `<name>.ini`'s `path=` line rather than assuming
+  `<name>.avd`, since those can genuinely differ (confirmed on a real
+  device on this machine). Real per-device disk usage (walking the
+  folder) and RAM (`config.ini`'s `hw.ramSize`, which can carry a K/M/G
+  suffix — `parse_size_to_mb` handles that) are both surfaced through
+  `list_avds`. `launch_avd` rejects a duplicate launch immediately
+  (checked via `find_serial_for_avd`) rather than spawning a second
+  emulator process that the emulator itself would reject a few seconds
+  into startup — confirmed live, that used to report false success. Its
+  boot-completion poll emits both `avd_log` (a text line, for the debug
+  panel) and `avd_booted` (a structured `{name}` event) — the frontend
+  uses the latter to flip a device's dashboard status from "Starting…" to
   "Running," rather than parsing log text.
 - `src-tauri/src/ide.rs` — `ANDROID_HOME` integration for external IDEs
   and the "which IDEs are running" detection.
@@ -102,11 +107,13 @@ module — run all of them with `cargo test --manifest-path src-tauri/Cargo.toml
 
 ## Good first issues
 
-Check the README roadmap. A frontend test suite (there's a Rust unit-test
-suite and one real e2e test already, nothing on the TS side) and
-multi-emulator serial targeting for `install_apk`/`rotate_avd` are both
-standalone and don't require deep familiarity with the rest of the
-codebase.
+Check the README roadmap. Multi-emulator serial targeting for
+`install_apk` (`rotate_avd` and the snapshot commands already target a
+specific serial) is standalone and doesn't require deep familiarity with
+the rest of the codebase. There's a Vitest/Testing Library suite on the
+frontend (`src/*.test.ts(x)`) alongside the Rust unit tests and one real
+e2e test — new pure-logic functions or components should generally come
+with a test in the same style.
 
 ## Reporting bugs
 

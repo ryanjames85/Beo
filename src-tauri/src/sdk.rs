@@ -3,6 +3,7 @@ use crate::util::{
     android_tool, cmdline_tools_bin, emit_progress, sdk_root, verify_sha256, AppError, SdkTask,
 };
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::process::Command;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Manager, State};

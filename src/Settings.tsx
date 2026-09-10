@@ -248,8 +248,8 @@ export default function Settings({
         <p className="section-label">About</p>
         <div className="feature-card" style={{ textAlign: "left" }}>
           <p className="feature-intro">
-            <strong>Beo</strong> {version ? `v${version}` : ""} — a clean, open-source Android
-            emulator manager. MIT licensed, no adware, no telemetry.
+            <strong>Beo</strong> {version ? `v${version}` : ""} — a clean, source-available Android
+            emulator manager. PolyForm Shield 1.0.0 licensed, no adware, no telemetry.
           </p>
           {versionError && (
             <p className="hint blocked-hint" style={{ margin: "0 0 8px" }}>

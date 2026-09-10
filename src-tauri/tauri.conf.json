@@ -1,6 +1,6 @@
 {
   "productName": "Beo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "identifier": "org.beo.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -35,6 +35,6 @@
       "icons/icon.ico"
     ],
     "shortDescription": "Beo — a clean, lightweight Android emulator manager",
-    "longDescription": "Beo installs and manages official Google Android SDK command-line tools, system images, and virtual devices — no bundled adware, fully open source."
+    "longDescription": "Beo installs and manages official Google Android SDK command-line tools, system images, and virtual devices — no bundled adware, source-available under PolyForm Shield 1.0.0."
   }
 }

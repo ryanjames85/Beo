@@ -344,7 +344,23 @@ pub(crate) fn launch_avd(
         args.push("-no-window".to_string());
     }
     if !share_clipboard {
-        args.push("-no-clipboard-sharing".to_string());
+        // Confirmed live against the currently installed emulator
+        // (37.1.11.0): `-no-clipboard-sharing` is gone entirely — not
+        // renamed, not moved to `-feature` (checked the full feature list
+        // in emulator/lib/advancedFeatures.ini, no clipboard entry at all).
+        // Passing it now hard-fails the launch with "unknown option."
+        // Rather than either crash the launch or silently pretend the
+        // toggle worked, tell the user via the debug log that this build
+        // can't honor it and proceed with clipboard sharing on (its
+        // current unconditional default) — a much smaller regression than
+        // failing to launch at all.
+        let _ = app.emit(
+            "avd_log",
+            AvdLogLine {
+                name: name.clone(),
+                line: "Clipboard sharing can't be disabled on this emulator version — launching with it on.".into(),
+            },
+        );
     }
     let mut child = android_tool(emulator_bin())
         .args(&args)
