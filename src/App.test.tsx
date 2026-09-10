@@ -1,10 +1,13 @@
-import { describe, it, expect } from "vitest";
-import {
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
+import App, {
   sanitizeAvdName,
   containsBlockedWord,
   isNetworkError,
   recommendedImage,
   explainInstallApkError,
+  initialOrientationForLaunch,
 } from "./App";
 
 describe("sanitizeAvdName", () => {
@@ -158,5 +161,141 @@ describe("explainInstallApkError", () => {
     const msg = explainInstallApkError("some never-before-seen adb error", "tes3");
     expect(msg).toContain("tes3");
     expect(msg).toContain("some never-before-seen adb error");
+  });
+});
+
+describe("initialOrientationForLaunch", () => {
+  const avds = [
+    { name: "phone1", category: "phone", diskUsageMb: 100, ramMb: 2048 },
+    { name: "tablet1", category: "tablet", diskUsageMb: 100, ramMb: 2048 },
+  ];
+
+  it("defaults to portrait for a phone", () => {
+    expect(initialOrientationForLaunch(avds, "phone1")).toBe("portrait");
+  });
+
+  it("defaults to landscape for a tablet — create_avd patches hw.initialOrientation for tablets", () => {
+    // This is the exact real bug it guards: assuming portrait regardless
+    // of category made the Rotate button's first click on a fresh tablet
+    // a silent no-op (it already matched the device's real starting
+    // rotation) while still claiming to have rotated it.
+    expect(initialOrientationForLaunch(avds, "tablet1")).toBe("landscape");
+  });
+
+  it("defaults to portrait for an unknown device name", () => {
+    expect(initialOrientationForLaunch(avds, "does_not_exist")).toBe("portrait");
+  });
+});
+
+// --- Component tests ---
+//
+// App.tsx owns ~28 Tauri commands' worth of state, and mocking that entire
+// surface just to render it was explicitly judged poor ROI (see TODO.md /
+// project memory). This mocks only the minimal set of commands the mount
+// path actually calls to reach a stable dashboard render with one device,
+// then targets two specific pieces of real reconciliation logic that were
+// previously only ever verified by hand: doStop's failure-path re-sync
+// against ground truth, and the log auto-dismiss timer.
+
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+
+const mockedInvoke = vi.mocked(invoke);
+
+const ONE_DEVICE = [{ name: "dev1", category: "phone", diskUsageMb: 100, ramMb: 2048 }];
+
+function mockBaseCommands(overrides: Record<string, unknown> = {}) {
+  const defaults: Record<string, unknown> = {
+    sdk_status: true,
+    check_network: { online: true, detail: "" },
+    check_java: { available: true, detail: "openjdk 21" },
+    list_avds: ONE_DEVICE,
+    list_available_images: [],
+    list_device_profiles: [],
+    check_hardware_accel: { available: true, backend: "WHPX", detail: "ok" },
+    preferred_abi: "x86_64",
+    list_running_avds: ["dev1"],
+    check_disk_space: { availableMb: 20000 },
+    data_paths: { dataRoot: "C:\\data", avdRoot: "C:\\avd" },
+    ...overrides,
+  };
+  mockedInvoke.mockImplementation(async (cmd: string) => {
+    if (cmd in defaults) return defaults[cmd];
+    return null;
+  });
+}
+
+beforeEach(() => {
+  mockedInvoke.mockReset();
+  localStorage.clear();
+});
+
+describe("App — dashboard reaches a stable render", () => {
+  it("shows the device from list_avds as Running once mounted", async () => {
+    mockBaseCommands();
+    render(<App />);
+    expect(await screen.findByText("dev1")).toBeInTheDocument();
+    expect(await screen.findByText(/Running/)).toBeInTheDocument();
+  });
+});
+
+describe("App — doStop reconciles against ground truth on failure", () => {
+  it("flips a device back to Stopped when stop_avd fails but the device isn't actually running anymore", async () => {
+    mockBaseCommands();
+    render(<App />);
+    const stopButton = await screen.findByRole("button", { name: "Stop" });
+
+    // The device already crashed on its own — stop_avd fails because
+    // find_serial_for_avd can't find it, and the very next
+    // list_running_avds call (the reconciliation query in doStop's catch
+    // block) correctly reports it's gone.
+    mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+      const name = (args as { name?: string } | undefined)?.name;
+      if (cmd === "stop_avd") throw new Error(`Couldn't find a running emulator for "${name}"`);
+      if (cmd === "list_running_avds") return [];
+      return null;
+    });
+
+    stopButton.click();
+
+    // Without the reconciliation fix, this device would stay stuck showing
+    // "Running" with a Stop button that fails the same way forever.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Launch" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
+  });
+});
+
+describe("App — log auto-dismiss", () => {
+  it("clears a no-action-needed log message on its own after a few seconds", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockBaseCommands();
+    render(<App />);
+    const stopButton = await screen.findByRole("button", { name: "Stop" });
+
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "stop_avd") return "Stopped dev1";
+      if (cmd === "list_running_avds") return [];
+      return null;
+    });
+    stopButton.click();
+
+    // doStop's success path doesn't call setLog, so trigger a message via
+    // the Nuke confirmation path being cancelled isn't available headlessly
+    // — simplest reliable no-action-needed message is the create-form's
+    // client-side name validation, which never touches the network.
+    const createButton = await screen.findByRole("button", { name: "+ Create" });
+    createButton.click();
+    await vi.waitFor(() =>
+      expect(screen.getByText(/Enter a device name with at least one letter or number/)).toBeInTheDocument()
+    );
+
+    vi.advanceTimersByTime(4200);
+    await vi.waitFor(() =>
+      expect(
+        screen.queryByText(/Enter a device name with at least one letter or number/)
+      ).not.toBeInTheDocument()
+    );
+    vi.useRealTimers();
   });
 });

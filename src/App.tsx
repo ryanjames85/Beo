@@ -60,6 +60,21 @@ export function isNetworkError(raw: string): boolean {
   return NETWORK_ERROR_PATTERNS.some((p) => lower.includes(p));
 }
 
+// Tablets actually boot landscape (create_avd patches hw.initialOrientation
+// for tablet profiles) — assuming portrait here regardless of category made
+// the Rotate button's first click on a tablet a silent no-op (it already
+// matched the device's real starting rotation) while still claiming to have
+// rotated it. A real, previously-shipped bug (see TODO.md) — split out as
+// its own function specifically so that class of regression has a test
+// guarding it, not just a comment.
+export function initialOrientationForLaunch(
+  avds: AvdInfo[],
+  name: string
+): "portrait" | "landscape" {
+  const isTablet = avds.find((a) => a.name === name)?.category === "tablet";
+  return isTablet ? "landscape" : "portrait";
+}
+
 // `adb install`'s own failure codes (INSTALL_FAILED_*) are accurate but
 // meant for developers reading logcat, not someone who just picked a file
 // from a dialog — sideloading is the one flow in this app where the user
@@ -655,13 +670,7 @@ export default function App() {
       next.delete(name);
       return next;
     });
-    // Tablets actually boot landscape (create_avd patches hw.initialOrientation
-    // for tablet profiles) — assuming portrait here regardless of category
-    // would make the Rotate button's first click a silent no-op (it already
-    // matches the device's real starting rotation) while still claiming to
-    // have rotated it.
-    const isTablet = avds.find((a) => a.name === name)?.category === "tablet";
-    setOrientation((prev) => ({ ...prev, [name]: isTablet ? "landscape" : "portrait" }));
+    setOrientation((prev) => ({ ...prev, [name]: initialOrientationForLaunch(avds, name) }));
     const shareClipboard = localStorage.getItem("beo-clipboard") !== "off";
     try {
       await invoke("launch_avd", { name, headless: false, shareClipboard });

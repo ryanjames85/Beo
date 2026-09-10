@@ -1,6 +1,7 @@
 use crate::jdk::ensure_jdk;
 use crate::util::{
-    android_tool, cmdline_tools_bin, emit_progress, sdk_root, verify_sha256, AppError, SdkTask,
+    adb_bin, android_tool, cmdline_tools_bin, emit_progress, emulator_bin, sdk_root, verify_sha256,
+    AppError, SdkTask,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -33,6 +34,68 @@ const CMDLINE_TOOLS_URL: &str =
 #[cfg(target_os = "linux")]
 const CMDLINE_TOOLS_SHA256: &str =
     "2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258";
+
+// platform-tools and emulator used to be installed via `sdkmanager install
+// platform-tools emulator` — sdkmanager has no way to request a specific
+// historical version of either (unlike build-tools, these package IDs carry
+// no version suffix), so every install silently got whatever Google
+// considered "latest" on that particular day. That's exactly how this
+// machine's own emulator ended up on a build that had quietly dropped the
+// `-no-clipboard-sharing` flag `launch_avd` depends on — nobody chose that
+// upgrade, it just happened. Pinned directly instead, the same way
+// cmdline-tools already is: an explicit URL + SHA-256 for a specific real
+// build, verified against Google's own repository manifest
+// (https://dl.google.com/android/repository/repository2-3.xml) and,
+// for every platform, against a real downloaded copy of the file — not
+// just copied from that manifest's (SHA-1) checksums. Moving to a newer
+// build from here on is a deliberate version bump in this file, not
+// something that happens silently on whatever day a user first installs.
+#[cfg(target_os = "windows")]
+const PLATFORM_TOOLS_URL: &str =
+    "https://dl.google.com/android/repository/platform-tools_r37.0.1-win.zip";
+#[cfg(target_os = "windows")]
+const PLATFORM_TOOLS_SHA256: &str =
+    "45f4d63113e895ebde0c90f194099a4676b6ac653bd28d54314a9e022bbc1a99";
+#[cfg(target_os = "macos")]
+const PLATFORM_TOOLS_URL: &str =
+    "https://dl.google.com/android/repository/platform-tools_r37.0.1-darwin.zip";
+#[cfg(target_os = "macos")]
+const PLATFORM_TOOLS_SHA256: &str =
+    "ee39ad5967e95c2a07f04dbcbde96b1a0c916ba376096db5d2f498b7727a5d1d";
+#[cfg(target_os = "linux")]
+const PLATFORM_TOOLS_URL: &str =
+    "https://dl.google.com/android/repository/platform-tools_r37.0.1-linux.zip";
+#[cfg(target_os = "linux")]
+const PLATFORM_TOOLS_SHA256: &str =
+    "d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1";
+
+// Emulator 37.1.11 (build 15917651) — the "stable" channel build as of this
+// pinning. Note this is the *same* build already installed on this machine
+// that's missing `-no-clipboard-sharing` (see launch_avd's own handling of
+// that) — pinning it doesn't undo that upstream removal, it stops any
+// *future* silent drift beyond it. Re-pin deliberately once a newer build
+// is verified to work (including re-checking that flag, or whatever
+// replaced it).
+#[cfg(target_os = "windows")]
+const EMULATOR_URL: &str =
+    "https://dl.google.com/android/repository/emulator-windows_x64-15917651.zip";
+#[cfg(target_os = "windows")]
+const EMULATOR_SHA256: &str = "5ff441f3b12ace9b13e9cf96fb0007d233967718652a8110705e995ac47bfeb7";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const EMULATOR_URL: &str =
+    "https://dl.google.com/android/repository/emulator-darwin_x64-15917651.zip";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const EMULATOR_SHA256: &str = "c1a3890f95b8868198918fad05ffca16fa20404d93547ba545ff5a5867ee7005";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const EMULATOR_URL: &str =
+    "https://dl.google.com/android/repository/emulator-darwin_aarch64-15917651.zip";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const EMULATOR_SHA256: &str = "22530de9363f34ea945ecb5cad74523abd4b615f27f3c1a9899efb183ea9e144";
+#[cfg(target_os = "linux")]
+const EMULATOR_URL: &str =
+    "https://dl.google.com/android/repository/emulator-linux_x64-15917651.zip";
+#[cfg(target_os = "linux")]
+const EMULATOR_SHA256: &str = "95771e0ae431897b2a4bd2d97fa095f29a8b0624a7b216baf529f9306161c266";
 
 /// Returns the absolute SDK root path as a string — this is what an
 /// external IDE (Android Studio, VS Code + extensions) needs to point at
@@ -240,15 +303,93 @@ pub(crate) fn preferred_abi() -> &'static str {
     }
 }
 
+/// Bundles the pieces that vary per pinned download — kept out of
+/// `download_and_verify`'s own argument list (clippy's too-many-arguments
+/// threshold) since `app`/`task`/`root` are structurally different (shared
+/// context, not per-download config) from these.
+struct PinnedDownload<'a> {
+    url: &'a str,
+    sha256: &'a str,
+    zip_filename: &'a str,
+    stage: &'a str,
+    label: &'a str,
+}
+
+/// Downloads a pinned, checksum-verified zip to `root`, honoring
+/// `task.cancelled` throughout (same as every other long-running download
+/// in this file) and emitting real progress. Returns the path to the
+/// downloaded (not-yet-extracted) zip file. Shared by cmdline-tools,
+/// platform-tools, and emulator — all three are now direct pinned
+/// downloads rather than sdkmanager package installs, see the URL/SHA256
+/// constants above for why.
+async fn download_and_verify(
+    app: &AppHandle,
+    task: &SdkTask,
+    root: &std::path::Path,
+    spec: PinnedDownload<'_>,
+) -> Result<std::path::PathBuf, AppError> {
+    use futures_util::StreamExt;
+    use std::io::Write;
+
+    let PinnedDownload {
+        url,
+        sha256,
+        zip_filename,
+        stage,
+        label,
+    } = spec;
+
+    task.cancelled.store(false, Ordering::SeqCst);
+    emit_progress(
+        app,
+        stage,
+        Some(0.0),
+        &format!("Starting {label} download…"),
+    );
+
+    let resp = reqwest::get(url).await?;
+    let total = resp.content_length();
+
+    let zip_path = root.join(zip_filename);
+    let mut file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        if task.cancelled.swap(false, Ordering::SeqCst) {
+            drop(file);
+            let _ = std::fs::remove_file(&zip_path);
+            return Err(AppError::Cancelled);
+        }
+        let chunk = chunk?;
+        file.write_all(&chunk).map_err(|e| e.to_string())?;
+        downloaded += chunk.len() as u64;
+        let percent = total.map(|t| (downloaded as f64 / t as f64) * 100.0);
+        let mb = downloaded as f64 / 1_048_576.0;
+        let detail = match total {
+            Some(t) => format!("{:.1} MB / {:.1} MB", mb, t as f64 / 1_048_576.0),
+            None => format!("{:.1} MB downloaded", mb),
+        };
+        emit_progress(app, stage, percent, &detail);
+    }
+    drop(file);
+
+    emit_progress(
+        app,
+        stage,
+        Some(100.0),
+        &format!("Verifying {label} download…"),
+    );
+    verify_sha256(&zip_path, sha256)?;
+    Ok(zip_path)
+}
+
 /// Downloads + unzips the official cmdline-tools package into the persistent
 /// data dir, then accepts SDK licenses non-interactively. Emits
 /// "sdk_install_progress" events throughout so the UI can show real progress
 /// instead of a static spinner.
 #[tauri::command]
 pub(crate) async fn install_sdk(app: AppHandle) -> Result<String, AppError> {
-    use futures_util::StreamExt;
-    use std::io::Write;
-
     let root = sdk_root();
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
@@ -262,6 +403,11 @@ pub(crate) async fn install_sdk(app: AppHandle) -> Result<String, AppError> {
     // sdk/cmdline-tools/ forever, alongside the real sdk/cmdline-tools/latest/
     // — confirmed live, it happened for real on this machine's own install
     // during an earlier verification pass that called install_sdk twice.
+    // The same "skip if already present" guard now applies to platform-tools
+    // and emulator too — previously they were unconditionally re-installed
+    // via sdkmanager on every call, which is exactly how an already-working
+    // emulator could silently drift to a newer, untested build just by
+    // calling install_sdk again as a repair action.
     if cmdline_tools_bin("sdkmanager").exists() {
         emit_progress(
             &app,
@@ -278,47 +424,26 @@ pub(crate) async fn install_sdk(app: AppHandle) -> Result<String, AppError> {
         // reported "Nothing running" and the download just continued).
         // Reset-then-check the same flag `cancel_sdk_task` sets here too.
         let task = app.state::<SdkTask>();
-        task.cancelled.store(false, Ordering::SeqCst);
-
-        emit_progress(&app, "downloading", Some(0.0), "Starting download…");
-
-        let resp = reqwest::get(CMDLINE_TOOLS_URL).await?;
-        let total = resp.content_length();
-
-        let zip_path = root.join("cmdline-tools.zip");
-        let mut file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
-
-        let mut stream = resp.bytes_stream();
-        let mut downloaded: u64 = 0;
-        while let Some(chunk) = stream.next().await {
-            if task.cancelled.swap(false, Ordering::SeqCst) {
-                drop(file);
-                let _ = std::fs::remove_file(&zip_path);
-                return Err(AppError::Cancelled);
-            }
-            let chunk = chunk?;
-            file.write_all(&chunk).map_err(|e| e.to_string())?;
-            downloaded += chunk.len() as u64;
-            let percent = total.map(|t| (downloaded as f64 / t as f64) * 100.0);
-            let mb = downloaded as f64 / 1_048_576.0;
-            let detail = match total {
-                Some(t) => format!("{:.1} MB / {:.1} MB", mb, t as f64 / 1_048_576.0),
-                None => format!("{:.1} MB downloaded", mb),
-            };
-            emit_progress(&app, "downloading", percent, &detail);
-        }
-        drop(file);
-
-        emit_progress(&app, "downloading", Some(100.0), "Verifying download…");
-        verify_sha256(&zip_path, CMDLINE_TOOLS_SHA256)?;
+        let zip_path = download_and_verify(
+            &app,
+            &task,
+            &root,
+            PinnedDownload {
+                url: CMDLINE_TOOLS_URL,
+                sha256: CMDLINE_TOOLS_SHA256,
+                zip_filename: "cmdline-tools.zip",
+                stage: "downloading",
+                label: "command-line tools",
+            },
+        )
+        .await?;
 
         emit_progress(&app, "extracting", None, "Extracting command-line tools…");
         let zf = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
         let mut archive = zip::ZipArchive::new(zf).map_err(|e| e.to_string())?;
         // Google's zip extracts to "cmdline-tools/" — we nest it under "latest/"
         // per the layout sdkmanager expects.
-        let extract_to = root.clone();
-        archive.extract(&extract_to).map_err(|e| e.to_string())?;
+        archive.extract(&root).map_err(|e| e.to_string())?;
 
         let extracted = root.join("cmdline-tools");
         let latest = extracted.join("latest");
@@ -337,12 +462,67 @@ pub(crate) async fn install_sdk(app: AppHandle) -> Result<String, AppError> {
     // that JDK already exists on disk.
     ensure_jdk(&app).await?;
 
-    // From here on it's all blocking child-process work (license prompt,
-    // then two sdkmanager installs) — run it via spawn_blocking rather than
+    if adb_bin().exists() {
+        emit_progress(
+            &app,
+            "platform-tools",
+            Some(100.0),
+            "platform-tools already installed",
+        );
+    } else {
+        let task = app.state::<SdkTask>();
+        let zip_path = download_and_verify(
+            &app,
+            &task,
+            &root,
+            PinnedDownload {
+                url: PLATFORM_TOOLS_URL,
+                sha256: PLATFORM_TOOLS_SHA256,
+                zip_filename: "platform-tools.zip",
+                stage: "platform-tools",
+                label: "platform-tools",
+            },
+        )
+        .await?;
+        emit_progress(&app, "platform-tools", None, "Extracting platform-tools…");
+        let zf = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(zf).map_err(|e| e.to_string())?;
+        archive.extract(&root).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&zip_path);
+    }
+
+    if emulator_bin().exists() {
+        emit_progress(&app, "emulator", Some(100.0), "Emulator already installed");
+    } else {
+        let task = app.state::<SdkTask>();
+        let zip_path = download_and_verify(
+            &app,
+            &task,
+            &root,
+            PinnedDownload {
+                url: EMULATOR_URL,
+                sha256: EMULATOR_SHA256,
+                zip_filename: "emulator.zip",
+                stage: "emulator",
+                label: "emulator",
+            },
+        )
+        .await?;
+        emit_progress(&app, "emulator", None, "Extracting emulator…");
+        let zf = std::fs::File::open(&zip_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(zf).map_err(|e| e.to_string())?;
+        archive.extract(&root).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&zip_path);
+    }
+
+    // From here on it's all blocking child-process work (just the license
+    // prompt now — platform-tools/emulator are direct downloads above, not
+    // sdkmanager package installs) — run it via spawn_blocking rather than
     // directly in this command's task, for the same reason download_image
     // does: blocking here directly would tie up a thread that's supposed to
     // stay free to dispatch other commands, cancel_sdk_task included.
     tauri::async_runtime::spawn_blocking(move || {
+        use std::io::Write;
         let task = app.state::<SdkTask>();
         emit_progress(&app, "licenses", None, "Accepting SDK licenses…");
         // Accept all licenses non-interactively.
@@ -355,8 +535,7 @@ pub(crate) async fn install_sdk(app: AppHandle) -> Result<String, AppError> {
             let _ = stdin.write_all(&b"y\n".repeat(20));
         }
         // Registered in task.child (same as run_sdkmanager_streaming does)
-        // so Cancel can actually kill this step too, not just the
-        // platform-tools/emulator installs after it — previously this
+        // so Cancel can actually kill this step too — previously this
         // short-lived child was invisible to cancel_sdk_task entirely.
         // Take-before-wait mirrors run_sdkmanager_streaming's own handling
         // of the cancel/finish race: if cancel_sdk_task already took (and
@@ -369,12 +548,6 @@ pub(crate) async fn install_sdk(app: AppHandle) -> Result<String, AppError> {
         if task.cancelled.swap(false, Ordering::SeqCst) {
             return Err(AppError::Cancelled);
         }
-
-        emit_progress(&app, "platform-tools", None, "Installing platform-tools…");
-        run_sdkmanager_streaming(&app, &task, &["platform-tools"], "platform-tools")?;
-
-        emit_progress(&app, "emulator", None, "Installing emulator…");
-        run_sdkmanager_streaming(&app, &task, &["emulator"], "emulator")?;
 
         emit_progress(&app, "done", Some(100.0), "SDK installed");
         Ok("SDK installed".into())

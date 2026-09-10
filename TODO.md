@@ -530,3 +530,115 @@ lands.
 - 51/51 frontend tests (10 net new), `tsc --noEmit`, `npm run build` all
   clean. The e2e script itself was run for real three times while fixing
   it (not just written and trusted) — see the bug it caught, above.
+
+---
+
+# Sixth batch: pin platform-tools and emulator versions
+
+Root-causes the class of bug behind the `-no-clipboard-sharing` removal
+(fourth batch): `install_sdk` installed platform-tools and emulator via
+plain `sdkmanager install platform-tools emulator`, which has no way to
+request a specific historical version of either package (unlike
+build-tools, they carry no version suffix) — every install silently got
+whatever Google considered "latest" that day, and calling `install_sdk`
+again later (its own repair path) could silently upgrade an
+already-working install to a newer, untested build with zero warning.
+
+## Done (2026-09-10)
+- [x] Pinned both packages the same way `cmdline-tools` already is: an
+      explicit URL + self-computed SHA-256 per platform, downloaded
+      directly and extracted without going through `sdkmanager`'s package
+      resolution at all. Sourced from Google's own repository manifest
+      (`https://dl.google.com/android/repository/repository2-3.xml`, the
+      same file `sdkmanager` itself reads) — **platform-tools r37.0.1**
+      and **emulator 37.1.11 (build 15917651, the "stable" channel build
+      as of this pinning)** across Windows/macOS(x64+arm64)/Linux(x64), 7
+      URL/hash pairs total. Every one of the 7 files was actually
+      downloaded (not just its checksum copied from the manifest) and its
+      SHA-256 computed independently — the manifest's own SHA-1 for each
+      was cross-checked and matched all 7, confirming genuine, unaltered
+      downloads before trusting them as the pinned values.
+- [x] Noted honestly in a code comment: the pinned "stable" emulator build
+      is the *same* build already installed on this machine that's
+      missing `-no-clipboard-sharing` — pinning doesn't undo that
+      upstream removal, it stops any *further* silent drift. Re-pinning
+      to a newer build later is a deliberate version bump in `sdk.rs`,
+      not something that happens automatically.
+- [x] Extracted a shared `download_and_verify()` helper (used by all three
+      pinned downloads now — cmdline-tools, platform-tools, emulator) to
+      avoid tripling the download/progress/cancellation loop; bundled its
+      per-download config into a `PinnedDownload` struct after clippy
+      flagged the unbundled version for having too many arguments.
+- [x] **Same "skip if already installed" guard now applies to
+      platform-tools and emulator, not just cmdline-tools** — this is the
+      actual fix for the repair-path drift: `install_sdk` checks
+      `adb_bin()`/`emulator_bin()` existence before each download, so
+      calling it again (its own documented repair/complete-an-install use
+      case) no longer touches either package if already present.
+- [x] **Verified live, fully, not just compiled:** built a debug bundle,
+      ran a real fresh `install_sdk()` against an isolated `BEO_DATA_DIR`
+      — cmdline-tools, JDK, platform-tools, and emulator all downloaded
+      via the new pinned path in 108s, `verify_sha256` passed for all of
+      them, extracted to the exact directory layout `adb_bin()`/
+      `emulator_bin()` expect, zero leftover zip files. Called
+      `install_sdk()` again on the same isolated dir immediately after:
+      returned in 0.7s (vs. 108s), confirming the skip-if-installed guard
+      actually prevents the redundant re-download/upgrade this whole
+      batch exists to stop. Then did a full functional pass — downloaded
+      a real system image, created and launched a real device with the
+      newly-pinned emulator binary, confirmed it boots and responds
+      (`rotate_avd` round-trip succeeded) — proving the pinned binary
+      isn't just present on disk but actually works. Cleaned up the
+      isolated dir, throwaway AVD, and downloaded verification zips
+      afterward.
+- 33/33 Rust tests, clippy, fmt all clean throughout. No new tests added —
+  this is download/wiring logic already covered by `verify_sha256`'s
+  existing accept/reject unit tests; the live e2e pass above is what
+  actually proves this behavior, the same way the original cmdline-tools
+  pinning was verified.
+
+---
+
+# Seventh batch: App.tsx test coverage
+
+`App.tsx` (the biggest, most stateful file — all refresh/reconcile/
+booted-state orchestration lives there) had zero automated coverage
+before this, only manual CDP verification each time it was touched. A
+full render-test mocking its entire ~28-command `invoke` surface was
+already deliberately deferred as poor ROI (see the "second pass" test
+coverage work) — this batch takes a narrower approach instead.
+
+## Done (2026-09-10)
+- [x] **Extracted `initialOrientationForLaunch(avds, name)`** — the
+      tablet-vs-phone default-rotation logic (`doLaunch` previously had
+      this inline) is now its own pure, exported, unit-tested function.
+      This is the exact real bug from an earlier pass (assuming portrait
+      regardless of category made a tablet's first Rotate click a silent
+      no-op) — now has a regression test guarding it specifically, not
+      just a comment.
+- [x] **New `App.test.tsx`**, merging the previous pure-only `App.test.ts`
+      (per the same one-file-per-component convention as `DeviceCard`/
+      `Settings`) plus two new component-level tests that mock only the
+      minimal command set needed to reach a stable one-device dashboard
+      render (~10 commands: `sdk_status`, `check_network`, `check_java`,
+      `list_avds`, `list_available_images`, `list_device_profiles`,
+      `check_hardware_accel`, `preferred_abi`, `list_running_avds`,
+      `check_disk_space`, `data_paths`) — not the full ~28-command
+      surface, scoped specifically to the two behaviors being tested:
+  - `doStop`'s failure-path reconciliation: `stop_avd` rejects (device
+    already crashed), the test confirms the very next `list_running_avds`
+    re-sync call actually flips the device back to "Stopped" instead of
+    leaving it stuck showing "Running" with a Stop button that would fail
+    the same way forever.
+  - The log auto-dismiss timer: a no-action-needed message (the
+    create-form's client-side name validation, chosen because it needs no
+    backend call) clears itself after ~4s via fake timers.
+- [x] **Verified both new component tests actually catch a regression,
+      not just pass** — temporarily disabled `doStop`'s reconciliation
+      re-sync (commented out the `setRunning`/`setBooted` calls in the
+      catch block), confirmed the exact new test failed with the device
+      stuck on "Running"/"Stop" and the raw error in the log, then
+      reverted and confirmed 57/57 pass again.
+- 57/57 frontend tests (6 net new: 3 for `initialOrientationForLaunch`, 3
+  component-level), `tsc --noEmit`, `npm run build` all clean. No Rust
+  changes this pass.
