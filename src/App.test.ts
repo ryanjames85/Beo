@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { sanitizeAvdName, containsBlockedWord, isNetworkError, recommendedImage } from "./App";
+import {
+  sanitizeAvdName,
+  containsBlockedWord,
+  isNetworkError,
+  recommendedImage,
+  explainInstallApkError,
+} from "./App";
 
 describe("sanitizeAvdName", () => {
   it("replaces disallowed characters with underscores", () => {
@@ -110,5 +116,47 @@ describe("recommendedImage", () => {
 
   it("returns undefined when no Play Store image is available at all", () => {
     expect(recommendedImage(["system-images;android-34;google_apis;x86_64"], "x86_64")).toBeUndefined();
+  });
+});
+
+describe("explainInstallApkError", () => {
+  it("translates an ABI mismatch into plain English", () => {
+    const msg = explainInstallApkError(
+      "adb: failed to install app.apk: Failure [INSTALL_FAILED_NO_MATCHING_ABIS: Failed to extract native libraries]",
+      "Medium_Phone_API_36.0"
+    );
+    expect(msg).toContain("architecture");
+    expect(msg).toContain("Medium_Phone_API_36.0");
+  });
+
+  it("translates an SDK-version mismatch into plain English", () => {
+    const msg = explainInstallApkError("Failure [INSTALL_FAILED_OLDER_SDK]", "tes3");
+    expect(msg).toContain("newer Android version");
+  });
+
+  it("translates a signature/version conflict into plain English", () => {
+    expect(explainInstallApkError("Failure [INSTALL_FAILED_UPDATE_INCOMPATIBLE]", "tes3")).toContain(
+      "Uninstall the existing app"
+    );
+    expect(explainInstallApkError("Failure [INSTALL_FAILED_VERSION_DOWNGRADE]", "tes3")).toContain(
+      "Uninstall the existing app"
+    );
+  });
+
+  it("translates an invalid/corrupt APK into plain English", () => {
+    expect(explainInstallApkError("Failure [INSTALL_FAILED_INVALID_APK]", "tes3")).toContain("valid APK");
+    expect(explainInstallApkError("cmd: INSTALL_PARSE_FAILED_NOT_APK", "tes3")).toContain("valid APK");
+  });
+
+  it("translates insufficient storage into plain English", () => {
+    expect(explainInstallApkError("Failure [INSTALL_FAILED_INSUFFICIENT_STORAGE]", "tes3")).toContain(
+      "out of storage"
+    );
+  });
+
+  it("falls back to the raw message for an unrecognized failure", () => {
+    const msg = explainInstallApkError("some never-before-seen adb error", "tes3");
+    expect(msg).toContain("tes3");
+    expect(msg).toContain("some never-before-seen adb error");
   });
 });

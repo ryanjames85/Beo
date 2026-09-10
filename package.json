@@ -12,7 +12,8 @@
     "start": "tauri dev",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e:jdk": "node scripts/e2e-jdk-bootstrap.mjs"
+    "test:e2e:jdk": "node scripts/e2e-jdk-bootstrap.mjs",
+    "test:e2e:avd": "node scripts/e2e-avd-sideload.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

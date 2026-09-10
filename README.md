@@ -114,9 +114,6 @@ before shipping through CI, not just a config file declaring the target.
 
 ## Roadmap / open issues
 
-- [ ] `install_apk` doesn't target a specific device serial — fine with
-      one emulator running, ambiguous with several at once (`rotate_avd`
-      and everything else that talks to a running device already does)
 - [ ] The hand-verified list of known-stable system-image API levels needs
       manual updates over time as new Android versions are released and
       actually confirmed to boot cleanly

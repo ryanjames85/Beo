@@ -469,3 +469,64 @@ lands.
   worth knowing why it's on).
 - 33/33 Rust tests, clippy, fmt, `tsc --noEmit`, 35/35 frontend tests,
   and `npm run build` all clean throughout.
+
+---
+
+# Fifth batch: sideload hand-holding, an AVD/sideload e2e test, Settings component tests
+
+## Done (2026-09-10)
+- [x] **Sideload UX hand-holding.** The success message after installing an
+      APK just said "Installed on X." with no next step — now says
+      "Installed on X. Open the app drawer on the device to launch it."
+      Failure messages were raw `adb install` output (`INSTALL_FAILED_*`
+      codes) — added `explainInstallApkError()` (`App.tsx`, exported,
+      unit-tested) translating the common real-world cases (ABI mismatch,
+      SDK-version mismatch, signature/version conflict, invalid/corrupt
+      APK, insufficient storage) into plain English with a concrete next
+      step, falling back to the raw message for anything not covered —
+      same "explain every failure mode, don't just show raw tool output"
+      convention already used for the update-check errors. 6 new tests.
+- [x] **New local-only e2e test**: `scripts/e2e-avd-sideload.mjs`
+      (`npm run test:e2e:avd`), covering the AVD lifecycle + sideloading
+      end to end through the real compiled app over CDP — create, launch,
+      wait for full boot, install a real APK (pulled live off the device
+      itself, so no bundled test fixture needed), confirm success, then
+      confirm installing onto a *not-running* device name fails cleanly
+      instead of silently falling through to adb's default target.
+      Deliberately **not** wired into CI (same call as the existing
+      `test:e2e:jdk`) — needs a real emulator boot (1-2 min even with
+      hardware acceleration) and doesn't isolate `BEO_DATA_DIR` like the
+      JDK e2e test does, running against the real installed SDK instead so
+      repeat local runs don't re-download a ~1GB system image every time.
+- [x] **Real bug caught by writing this e2e test, before it ever shipped
+      wrong**: the first run failed with adb's own "device is still
+      booting" error during `install_apk`, even though `rotate_avd` had
+      *just* succeeded moments earlier — proving a successful rotate
+      (window manager responding) is not sufficient proof the device is
+      ready for package installs; `PackageManagerService` can still be
+      initializing after window manager already responds. Fixed by having
+      the e2e script poll `sys.boot_completed` for 3 consecutive reads
+      (matching `launch_avd`'s own internal boot-completion threshold)
+      before attempting the install. Also hardened the poll itself after a
+      second run hit a transient `adb shell` exit-255 hiccup (normal
+      adb behavior right after boot) that crashed the whole script — now
+      caught and treated as "not ready yet" rather than fatal. Third run
+      passed clean end to end.
+- [x] **New `Settings.test.tsx` component test suite** (Settings.tsx had
+      zero component-level coverage before this — only pure-function tests
+      for `isNewerVersion`, now merged into this file per the same
+      one-file-per-component convention `DeviceCard.test.tsx` already
+      uses). Covers: Data & storage paths rendering (and their unloaded
+      "…" placeholder state), Copy-button "Copied!" feedback with fake
+      timers, the IDE-integration result message actually rendering inside
+      the "Use with another IDE" card (a regression guard for the exact
+      bug just fixed in the fourth batch), the About section's four
+      update-check states, and Debug-section visibility gating on
+      `devMode`. First component test file in this project to mock
+      `@tauri-apps/api/core`'s `invoke` — sets the pattern for testing any
+      future component that calls Tauri commands directly rather than only
+      taking props (`DeviceCard`/`CreateDeviceForm` are pure-props, so
+      never needed this).
+- 51/51 frontend tests (10 net new), `tsc --noEmit`, `npm run build` all
+  clean. The e2e script itself was run for real three times while fixing
+  it (not just written and trusted) — see the bug it caught, above.

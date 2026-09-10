@@ -60,6 +60,32 @@ export function isNetworkError(raw: string): boolean {
   return NETWORK_ERROR_PATTERNS.some((p) => lower.includes(p));
 }
 
+// `adb install`'s own failure codes (INSTALL_FAILED_*) are accurate but
+// meant for developers reading logcat, not someone who just picked a file
+// from a dialog — sideloading is the one flow in this app where the user
+// supplies an arbitrary third-party file Beo has no control over, so this
+// is also the one place genuinely worth translating raw tool output into
+// what to actually do about it. Falls back to the raw message for any
+// code not covered here, same as every other error path in this app.
+export function explainInstallApkError(raw: string, deviceName: string): string {
+  if (raw.includes("INSTALL_FAILED_NO_MATCHING_ABIS")) {
+    return `That APK doesn't include a build for "${deviceName}"'s architecture (most Beo devices are x86_64, and many real-world APKs are ARM-only). Look for a "universal" or multi-arch build of the app instead.`;
+  }
+  if (raw.includes("INSTALL_FAILED_OLDER_SDK")) {
+    return `That APK requires a newer Android version than "${deviceName}" is running. Create a device with a newer system image, or find an older build of the app.`;
+  }
+  if (raw.includes("INSTALL_FAILED_UPDATE_INCOMPATIBLE") || raw.includes("INSTALL_FAILED_VERSION_DOWNGRADE")) {
+    return `A different version of this app is already installed on "${deviceName}" with an incompatible signature. Uninstall the existing app on the device first, then try again.`;
+  }
+  if (raw.includes("INSTALL_FAILED_INVALID_APK") || raw.includes("INSTALL_PARSE_FAILED")) {
+    return "That file isn't a valid APK (or the download was incomplete/corrupted) — try re-downloading it.";
+  }
+  if (raw.includes("INSTALL_FAILED_INSUFFICIENT_STORAGE")) {
+    return `"${deviceName}" is out of storage space. Free some up (delete unused apps/data on the device) and try again.`;
+  }
+  return `Failed: Install APK on "${deviceName}": ${raw}`;
+}
+
 // `install_sdk` and `download_image` — the two long-running, cancellable,
 // network-dependent commands with a Cancel button and a progress bar —
 // reject with this structured shape instead of a plain string (see
@@ -706,9 +732,11 @@ export default function App() {
     try {
       const result = await invoke<string>("install_apk", { name, apkPath: path });
       logDebug(`Install result for "${name}": ${result || "OK"}`);
-      setLog(`Installed on ${name}.`);
+      setLog(`Installed on ${name}. Open the app drawer on the device to launch it.`);
     } catch (e) {
-      fail(`Install APK on "${name}"`, e);
+      const raw = String(e);
+      logDebug(`ERROR — Install APK on "${name}": ${raw}`);
+      setLog(explainInstallApkError(raw, name));
     } finally {
       setInstallingApk(null);
     }
