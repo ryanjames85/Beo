@@ -13,7 +13,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e:jdk": "node scripts/e2e-jdk-bootstrap.mjs",
-    "test:e2e:avd": "node scripts/e2e-avd-sideload.mjs"
+    "test:e2e:avd": "node scripts/e2e-avd-sideload.mjs",
+    "test:audio:youtube": "node scripts/test-audio-youtube.mjs",
+    "test:audio:file": "node scripts/test-audio-file.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

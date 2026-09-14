@@ -41,12 +41,13 @@ npm run tauri build
 ```
 
 Produces NSIS/MSI on Windows, DMG on macOS, AppImage/deb on Linux —
-standard installer UX per platform, per `tauri.conf.json`. **Only Windows
-is currently built and released via CI** (`.github/workflows/release.yml`,
-tag-triggered) — macOS/Linux targets exist in the config and build fine
-locally, but aren't part of the release pipeline yet: they still need a
-real install/launch/uninstall verification pass by hand on each platform
-before shipping through CI, not just a config file declaring the target.
+standard installer UX per platform, per `tauri.conf.json`. **Windows and
+Linux are built and released via CI** (`.github/workflows/release.yml`,
+tag-triggered); **macOS is not yet** — its target exists in the config and
+builds fine locally, but isn't wired into the release workflow. Both
+Windows and Linux still need a real install/launch/uninstall verification
+pass by hand on an actual tagged release (not just "the workflow file
+looks right") before that's considered done — see `TODO.md`.
 
 ## How it works
 
@@ -118,9 +119,12 @@ before shipping through CI, not just a config file declaring the target.
       manual updates over time as new Android versions are released and
       actually confirmed to boot cleanly
 - [ ] Drag-and-drop APK install (currently a file-picker button, not drag-drop)
-- [ ] macOS/Linux installers — buildable locally, not yet part of the
-      release pipeline (see above); macOS Gatekeeper quarantine handling
-      on downloaded binaries is also unaddressed
+- [ ] Linux's release-pipeline leg is wired up but not yet verified against
+      a real tagged release (build/launch/uninstall by hand on a real
+      machine) — see `TODO.md`
+- [ ] macOS installer — buildable locally, not yet part of the release
+      pipeline; Gatekeeper quarantine handling on downloaded binaries is
+      also unaddressed
 - [ ] Windows releases are built and drafted by CI (`release.yml`) but
       **not yet code-signed** — the workflow is wired for SignPath.io's
       free OSS signing program, pending that application being approved.
@@ -130,6 +134,17 @@ before shipping through CI, not just a config file declaring the target.
       download+install) is still deferred — today's update check
       (Settings → About, plus a daily background check) only compares
       versions and links out to a manual download; see `TODO.md`
+- **Known limitation, accepted**: audio can pop/crackle during
+  video/streaming playback (e.g. YouTube in a browser). Root-caused live —
+  the player requests a "deep buffer" audio output the emulator's virtual
+  sound hardware doesn't provide on Google Play system images, so it falls
+  back to a shorter-buffer path with much less tolerance for scheduling
+  hiccups. Fixable in principle only by switching to a non-Play
+  `google_apis` image (rootable, unlike the Play Store one) and patching
+  its audio HAL config — which means losing Play Store/Play Services on
+  that device. Given that tradeoff, Beo keeps the Play Store image default
+  and treats this as a documented limitation rather than an open bug; see
+  `TODO.md` for the full investigation.
 
 See `TODO.md` for the full PoC → alpha/beta hardening plan (CI, download
 integrity, module structure, test coverage, error handling) and what's

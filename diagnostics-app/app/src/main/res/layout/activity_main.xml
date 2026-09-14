@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scrollRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:clipToPadding="false">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Beo Diagnostics"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Audio -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Audio"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Plays a continuous 440Hz tone. Listen for popping/crackling."
+            android:layout_marginBottom="8dp" />
+        <Button
+            android:id="@+id/btnAudio"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Play Tone" />
+        <TextView
+            android:id="@+id/txtAudio"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stopped."
+            android:layout_marginBottom="16dp" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Plays a short bundled music-like file via MediaPlayer — a second, non-browser audio path, so a glitch can be checked against both."
+            android:layout_marginBottom="8dp" />
+        <Button
+            android:id="@+id/btnMusic"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Play Music File" />
+        <TextView
+            android:id="@+id/txtMusic"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stopped."
+            android:layout_marginBottom="24dp" />
+
+        <!-- GPU -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="GPU / Rendering"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Animates a shape and reports live FPS. Low/unstable FPS indicates rendering trouble."
+            android:layout_marginBottom="8dp" />
+        <Button
+            android:id="@+id/btnGpu"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Start Animation" />
+        <org.beo.diagnostics.GpuTestView
+            android:id="@+id/gpuView"
+            android:layout_width="match_parent"
+            android:layout_height="150dp"
+            android:layout_marginTop="8dp"
+            android:background="#EEEEEE" />
+        <TextView
+            android:id="@+id/txtGpu"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Stopped."
+            android:layout_marginBottom="24dp" />
+
+        <!-- Network -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Network"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Checks connectivity against Android's own official connectivity-check endpoint."
+            android:layout_marginBottom="8dp" />
+        <Button
+            android:id="@+id/btnNetwork"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Check Network" />
+        <TextView
+            android:id="@+id/txtNetwork"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Not checked yet."
+            android:layout_marginBottom="24dp" />
+
+        <!-- Storage -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Storage"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Writes, reads back, and deletes a small test file; reports free space."
+            android:layout_marginBottom="8dp" />
+        <Button
+            android:id="@+id/btnStorage"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Check Storage" />
+        <TextView
+            android:id="@+id/txtStorage"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Not checked yet." />
+
+    </LinearLayout>
+</ScrollView>

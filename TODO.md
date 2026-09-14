@@ -389,6 +389,14 @@ lands.
   out to matter enough to a user to justify either.
 
 ## Still to do
+
+**Release gate, stated explicitly by the user (2026-09-10): tag and
+release only once the build has been tested and confirmed working on
+both Windows and Linux.** Not before. macOS testing is separately
+deferred ("down the road") and isn't part of this gate — don't wait on it
+before the Windows+Linux release, and don't push a tag or suggest one is
+due until the user says both platforms are confirmed.
+
 - [ ] Push the `v0.2.0` tag to trigger the real `release.yml` run on
       GitHub's own Windows runner — this is a git push, so per this
       project's standing rule the user does this themselves, not Claude.
@@ -405,13 +413,31 @@ lands.
       `SIGNPATH_ORG_ID` as repo secrets; the workflow already knows what
       to do with them the moment they exist, no further code changes
       needed.
-- [ ] macOS/Linux installers — deferred, revisit once there's a way to
-      verify them by hand. **User has a Mac and a Linux VM available for
-      this testing** — when picking this back up, add `macos-latest` and
-      `ubuntu-22.04` legs back to `release.yml`'s `build` job (dmg/appimage/
-      deb targets already declared in `tauri.conf.json`, just need release
-      workflow coverage) and verify install/launch/uninstall by hand on
-      each, same discipline as the Windows NSIS verification above.
+- [x] **Linux CI leg wired up (2026-09-10)** — new `build-linux` job in
+      `release.yml` (`ubuntu-22.04`, own system deps step mirroring
+      `ci.yml`'s, bash-based artifact collection since PowerShell doesn't
+      apply there), producing `Beo-linux.AppImage`/`Beo-linux.deb` and
+      feeding them into the `release` job alongside the Windows
+      installers. Skips the `sign` job entirely — SignPath signs Windows
+      PE binaries specifically, appimage/deb don't need or support that.
+      Release notes updated to cover the Linux install steps too. YAML
+      syntax validated locally (`npx js-yaml`) but not run for real —
+      GitHub Actions itself needs an actual runner, so *that specific
+      workflow file* is only confirmed once a tag triggers it.
+      **That's separate from testing the Linux build itself, which
+      doesn't need a tag or CI at all** — same as how the Windows NSIS
+      cycle was verified by just running `npm run tauri build` locally
+      and installing the result by hand. Next real step: build locally on
+      the Linux VM (`npm run tauri build`, produces the `.AppImage`/`.deb`
+      under `src-tauri/target/release/bundle/`) and verify
+      install/launch/uninstall there — that can happen any time, well
+      before deciding to push a tag.
+- [ ] macOS installer — deferred, "down the road" per the user
+      (2026-09-10, sequencing decided: Linux first, Mac later). When
+      picking it up: add a `macos-latest` leg the same way (the `dmg`
+      target is already declared in `tauri.conf.json`), verify
+      install/launch/uninstall by hand on the Mac, and address Gatekeeper
+      quarantine handling on the downloaded binary.
 
 ---
 
@@ -642,3 +668,683 @@ coverage work) — this batch takes a narrower approach instead.
 - 57/57 frontend tests (6 net new: 3 for `initialOrientationForLaunch`, 3
   component-level), `tsc --noEmit`, `npm run build` all clean. No Rust
   changes this pass.
+
+---
+
+# Eighth batch: switch back to real GPU rendering, fixing audio glitches
+
+User reported glitchy audio playing YouTube in a tablet's browser.
+Investigated live rather than guessing:
+- Host: hypervisor active, host CPU 4-9%, emulator process ~20% of one
+  core — not overloaded.
+- Confirmed the bundled `qemu-system-x86_64.exe` only contains the
+  **DirectSound** audio backend string (no WASAPI) — the older, more
+  glitch-prone Windows audio API, already the only option this build
+  offers regardless of any `-audio` flag Beo could pass.
+- The real lever available: `-gpu swiftshader_indirect` (software
+  rendering, CPU-based) had been the pinned default since early in this
+  project specifically because `-gpu auto` once hung forever at the boot
+  logo on this exact host. Software rendering competes with audio for the
+  same CPU cycles during video playback — a known contributor to exactly
+  this kind of glitching.
+
+## Done (2026-09-10)
+- [x] **Re-tested `-gpu host` by hand, not just reasoned about** — a
+      throwaway device launched with `-gpu host` booted fast (~10-30s) and
+      stayed stable for a 3-minute observation window, using the real
+      discrete GPU (confirmed in the emulator's own log: "Graphics
+      backend: gfxstream" against the actual Radeon RX 7600 XT) via
+      gfxstream, not the software path. Audio modules (WINMM, dsound,
+      MMDevApi, AUDIOSES) loaded normally. `-gpu auto`'s old hang was never
+      specifically re-tested as plain `-gpu host` before now — `auto`'s
+      heuristic may have picked something else entirely, or the host/driver
+      state has simply changed since the original finding.
+- [x] **Switched `launch_avd`'s pinned `-gpu` value from
+      `swiftshader_indirect` to `host`** (`avd/lifecycle.rs`). Doc comment
+      rewritten to carry the full history honestly: the original hang,
+      why swiftshader was chosen, why it's being moved off now, and that
+      `swiftshader_indirect` is the known-safe fallback if a hang like the
+      original one ever recurs on some future host/driver combination —
+      this is a real, live regression risk being knowingly accepted to fix
+      a confirmed real UX problem (glitchy audio), not a risk-free change.
+- [x] 33/33 Rust tests, clippy, fmt all clean.
+- **Not fully re-verified through Beo's own compiled UI this pass** — the
+  user's real `tauri dev` session was active throughout, and WebView2
+  reuses the same browser process for a given app identifier, so a second
+  Tauri instance launched alongside it doesn't get its own debuggable
+  browser process (no way to attach CDP without touching their session).
+  Verified instead via direct `emulator.exe` invocation with the exact
+  same flags `launch_avd` now produces (identical `-avd`/`-gpu host`
+  arguments) — a real, equivalent test of the actual emulator behavior,
+  just not driven through Beo's own IPC layer this specific time. **Ask
+  the user to relaunch their real tablet and confirm the audio glitching
+  is actually gone** — that's the real acceptance test this fix exists
+  for, and hasn't been confirmed yet.
+
+---
+
+# Ninth batch: Beo Diagnostics — a sideloadable test app
+
+While debugging the audio glitching above, verification kept hitting a
+wall: no controlled, repeatable way to generate a test signal inside the
+guest, or compare rendering/network/storage behavior across
+`-gpu`/`-feature` experiments except by subjective impression. User asked
+for a small on-demand test utility — a real installable APK, not adb
+one-liners — covering a broader health check (audio, GPU, network,
+storage), agreed via plan mode before writing any code.
+
+## Done (2026-09-10)
+- [x] **New `diagnostics-app/` project** — a real Android app (Kotlin,
+      plain Views, no Compose/Hilt/Room/DI — deliberately far simpler than
+      the user's other Android project since this is a lightweight dev
+      tool). One Activity, four independent checks, each with a Run/Stop
+      button and live status:
+  - **Audio** — synthesizes a 440Hz sine tone directly via `AudioTrack`
+    (no bundled asset needed) and loops it with an elapsed-time counter —
+    a controlled, repeatable signal instead of YouTube's variable content.
+  - **GPU/rendering** — an animated `View.onDraw` bouncing box with a live
+    FPS readout via `Choreographer.postFrameCallback`.
+  - **Network** — HEAD request to Android's own official
+    connectivity-check endpoint, reporting latency.
+  - **Storage** — write → read-back → delete a temp file, reports free
+    space via `StatFs`.
+- [x] **This is explicitly NOT part of Beo's own build.** Beo's bundled
+      SDK deliberately has no build-tools (kept minimal) — this app is
+      built once, separately, using the machine's *other*, already-present
+      Android Studio SDK (`C:\Users\ryan\AppData\Local\Android\Sdk`,
+      build-tools 36.0.0), via `./gradlew assembleDebug`. Gradle wrapper
+      files reused directly from the user's other Android project
+      (`development/balla/apps/android`) — same bootstrap code, no need to
+      reinvent it, and it let the build use an already-cached Gradle
+      8.9 distribution with zero fresh downloads. **Built successfully on
+      the first real attempt** — `BUILD SUCCESSFUL in 31s`.
+- [x] Compiled APK copied to `resources/beo-diagnostics.apk` (7.3MB) and
+      committed as a binary — see `diagnostics-app/README.md` for how to
+      rebuild it later (only when this app's own code changes, not on
+      every Beo build). Added `diagnostics-app/.gitignore` so Gradle's own
+      `build/`/`.gradle/`/`.kotlin/` caches never get committed alongside
+      it.
+- [x] **Beo integration**: `tauri.conf.json`'s `bundle.resources` now
+      ships the APK inside every installer. New Rust command
+      `install_diagnostics_apk(name)` in `avd/lifecycle.rs` (right next to
+      `install_apk`) resolves the bundled resource's real path via
+      Tauri's `PathResolver`/`BaseDirectory::Resource`, reuses the exact
+      same `find_serial_for_avd` + `adb install -r` logic `install_apk`
+      already has, then also runs `adb shell am start` so it's
+      install-and-open in one click — no file picker needed, unlike
+      sideloading an arbitrary APK, since this one's bundled with Beo
+      itself. New "Diagnostics" button on `DeviceCard.tsx`, gated on
+      `ready` the same way Rotate/Install APK/Snapshots already are.
+- [x] **Verified live, thoroughly, on a real throwaway device**: installed
+      and launched for real (`adb install` → `adb shell am start`,
+      confirmed via `dumpsys activity activities` that it was genuinely
+      the foreground activity, no crash in logcat). Then actually drove
+      the UI via `uiautomator dump` + coordinate-based `input tap` on all
+      four buttons and read back the real results: **440Hz tone playing
+      with a live elapsed-time counter, 60fps GPU animation (confirming
+      `-gpu host` is delivering full smooth rendering), a real network
+      check succeeding in 1336ms, and a real free-space report (3981MB)
+      from a genuine write/read/delete cycle.** All four checks work
+      exactly as designed, first try.
+- 33/33 Rust tests, clippy, fmt, `tsc --noEmit`, 57/57 frontend tests,
+  `npm run build` all clean.
+- **Not yet verified through Beo's own compiled UI end-to-end** — same
+  WebView2 shared-browser-profile obstacle as the audio-fix batch above:
+  the user's real `tauri dev` session was active throughout, and a second
+  instance can't get its own debuggable browser process regardless of
+  which binary launches it (dev vs. release — WebView2's profile is keyed
+  by the app identifier, not the exe path). The Rust command's ADB logic
+  is the same proven pattern `install_apk` already uses; the one genuinely
+  new, unverified piece is Tauri's resource-path resolution actually
+  finding the bundled APK at runtime. **Ask the user to click the new
+  "Diagnostics" button on a real device in their own already-running
+  session** (it already picked up this code via its file-watcher) — that
+  closes the loop on the one untested part, and is the real end-to-end
+  acceptance test regardless.
+
+## Bug found and fixed on first real use: content hidden behind system bars
+User installed the app for real on their own tablet (`tes3`) and reported
+"app is not scrollable." Investigated live rather than guessing — dumped
+the real UI hierarchy via `uiautomator`, which showed `scrollable="false"`
+on the root `ScrollView` even though the bottom "Storage" section's button
+was rendered at y=1413-1509 on a 1600px-tall screen with the navigation
+bar occupying y=1536-1600. Root cause: `compileSdk`/`targetSdk = 36`
+enables Android 15+'s **enforced edge-to-edge** — the system draws the
+status bar (top 48px) and navigation bar (bottom 64px) *over* app content
+by default now, not beside it. The `ScrollView` correctly measured "all
+content fits in 1600px" and reported nothing to scroll, while in reality
+the bottom of the Storage section was rendered directly behind the opaque
+navigation bar — invisible and unreachable. Looked exactly like "the app
+doesn't scroll" because there was genuinely nothing left to scroll to; the
+content was just hidden behind system chrome.
+- [x] Fixed via `ViewCompat.setOnApplyWindowInsetsListener` padding the
+      scroll root by the real system-bar insets — not the deprecated
+      `setDecorFitsSystemWindows(true)` opt-out, since Google's own
+      direction is that opting out of edge-to-edge won't keep being
+      honored in future Android versions.
+- [x] **Verified live on the user's actual real tablet**, not a
+      throwaway: rebuilt, reinstalled over the running app, re-dumped the
+      UI — `ScrollView` now correctly reports `scrollable="true"`.
+      Performed a real `adb shell input swipe` gesture and confirmed the
+      Storage button moved from a clipped 11px sliver at the very bottom
+      edge to its full, normal height, fully clear of the navigation bar.
+- Updated `resources/beo-diagnostics.apk` with the fix; no Rust/frontend
+  changes needed for this one (contained entirely inside the Android app).
+
+## Tenth batch — a real, repeatable audio-glitch test case (2026-09-14)
+User asked to actually spin up a device and test the `-gpu host` +
+`-feature -VirtioSndCard` audio changes against real YouTube playback,
+since neither Claude nor an automated script can literally listen for the
+reported popping — the ask was for an objective, repeatable signal
+alongside listening, not a replacement for it.
+
+New script: `scripts/test-audio-youtube.mjs` (`npm run test:audio:youtube`,
+local-only, not wired into CI — same reasoning as the other e2e scripts).
+Drives the real compiled Beo binary over CDP exactly like
+`e2e-avd-sideload.mjs`, creates a throwaway device via Beo's real
+`create_avd`/`launch_avd` (so it exercises whatever `-gpu`/`-feature` flags
+are currently pinned in `lifecycle.rs`), opens a live YouTube stream in
+Chrome, clicks through onboarding, confirms real audio playback via
+`dumpsys audio`, then captures 45s of logcat and flags any
+underrun/xrun/glitch lines.
+
+Getting this to actually run cleanly (not just compile) surfaced a chain
+of real bugs, each confirmed live before moving to the next:
+- [x] The debug binary was silently a *dev-mode* build pointing at
+      `http://localhost:1420` (Vite dev server) instead of the bundled
+      frontend — a plain `cargo build`/`cargo check` run elsewhere during
+      this session had overwritten `target/debug/beo.exe`, which the
+      script's `--skip-build` flag then reused. Only `npm run tauri build
+      -- --debug` produces the self-contained binary this script needs.
+- [x] `adb devices` reported nothing even with the emulator genuinely
+      running — Beo runs adb/emulator against a *private* adb server
+      (`ANDROID_ADB_SERVER_PORT=5039`, see `android_tool()` in `util.rs`)
+      so it never collides with a system adb install. Every adb call this
+      script makes now sets the same env var.
+- [x] A `list_running_avds`-based boot check can report "booted" slightly
+      before adb has actually attached the emulator's serial (same race
+      already documented in `e2e-avd-sideload.mjs`) — added the same
+      `sys.boot_completed`-polling confirmation step.
+- [x] The cookie-consent dialog's scroll gesture started *below* the
+      dialog card, in the dimmed background page, so "Accept all" was
+      never scrolled into view — fixed the swipe to act within the card's
+      actual bounds.
+- [x] A hardcoded specific video ID is a single point of failure — the one
+      this was first pinned to went from "live" to permanently unavailable
+      between sessions. Switched to a channel's `/live` URL
+      (`youtube.com/@LofiGirl/live`), which YouTube always resolves to
+      whatever that channel currently has live.
+- [x] Chrome's autoplay policy mutes video that starts playing without a
+      user gesture — the stream was genuinely playing, just silently, with
+      a "TAP TO UNMUTE" control. That control isn't reliably
+      text-labeled (one run showed a text banner, another only a bare
+      icon with zero accessible text), so switched to a fixed-coordinate
+      tap that works for both variants.
+- [x] A single fixed sleep after that unmute tap caused a false negative —
+      the tap had worked, but `dumpsys audio` hadn't registered the new
+      focus yet, so the script gave up on an already-fixed stream and
+      hopped to a still-muted related video instead. Now polls for a few
+      seconds before concluding the tap didn't do anything.
+- [x] `adb logcat -d` after 45s of real playback exceeds Node's default
+      1MB `execFileSync` buffer (`ENOBUFS`) — raised `maxBuffer` to 64MB.
+- [x] Related-video fallback (used when the primary stream isn't live) now
+      matches on the `"<title> by <channel> ... N views|watching"` pattern
+      unique to real related-video rows, with a real-height check —
+      earlier attempts matched the *primary* video's own standalone view
+      count, or degenerate zero-height off-screen placeholder rows
+      `uiautomator` returns for content not yet scrolled into view.
+- [x] **Actually run successfully end-to-end at least once** (2026-09-14):
+      real device, real Chrome/YouTube playback, confirmed real
+      `AudioManager` focus, 45s of real logcat captured, no explicit
+      underrun/xrun/glitch lines found in that run. As the script itself
+      says on every run: this confirms the log shows no explicit
+      underruns — it cannot confirm the audio actually sounds clean. The
+      user still needs to listen for themselves to close that loop.
+
+## Eleventh batch — a second, non-browser audio test path, sharing infrastructure with the first (2026-09-14)
+User asked to extend the audio test into an actual suite: play a real audio
+file (not synthesized, not through the browser) so the YouTube/Chrome path
+and a plain native path can both be tested — a clean result in Chrome alone
+doesn't prove the underlying emulator audio pipeline is fine (Chrome has its
+own decode/playback path), and a glitchy result in Chrome alone doesn't
+prove the emulator is at fault either. Testing both tells you which side of
+that line a problem is on.
+
+- [x] **Shared scaffolding extracted** into `scripts/lib/audio-test-common.mjs`
+      — build/launch/CDP connect, AVD create+boot (with all three
+      previously-fixed races folded in), adb helpers, `uiautomator`
+      dump/tap, logcat glitch analysis, cleanup. `test-audio-youtube.mjs`
+      was refactored onto this shared module and re-verified still passes
+      end-to-end after the refactor — same real device, real Chrome
+      playback, real focus confirmation, clean logcat.
+- [x] **`diagnostics-app` gained a "Play Music File" section** — native
+      `MediaPlayer` playing a bundled synthetic WAV
+      (`res/raw/sample_song.wav`, generated by new
+      `scripts/generate-sample-song.mjs`: a short melody with two-partial
+      "notes" and per-note fade envelopes, closer to real music than the
+      app's existing single-frequency test tone, deliberately synthetic
+      rather than a real downloaded track to avoid any licensing question).
+      Loops via `MediaPlayer.isLooping` so one tap sustains playback for a
+      full capture window.
+- [x] **Real bug found and fixed while wiring up detection**: the new
+      music-file button's real, active playback initially showed *zero*
+      audio focus signal — not a script bug, but a real gap in the app:
+      `MediaPlayer.create()` alone never requests `AudioFocus` and, without
+      an explicit `AudioAttributes`, reports `usage=USAGE_UNKNOWN` in
+      `dumpsys audio` — confirmed live via the full dump, which showed a
+      genuine `state:started` `AudioPlaybackConfiguration` entry (real
+      playback, undeniably) while the legacy "Audio Focus stack" section
+      was completely empty. Fixed two ways: (1) `diagnostics-app` now sets
+      proper `AudioAttributes` (`USAGE_MEDIA`/`CONTENT_TYPE_MUSIC`) and
+      formally requests `AudioFocus` via `AudioFocusRequest`, making it a
+      well-behaved media app like the thing it's meant to approximate; (2)
+      `hasAudioFocus()` (shared helper, used by both test scripts) now
+      checks for a `state:started` `AudioPlaybackConfiguration` instead of
+      the old `"USAGE_MEDIA"` + `"gain: GAIN"` substring pair, since that
+      pair was confirmed live to miss genuine playback that never populates
+      the legacy focus-stack section — this is a more robust signal
+      regardless of an app's own focus-request hygiene. Re-verified the
+      YouTube script still passes with the new check.
+- [x] New `scripts/test-audio-file.mjs` (`npm run test:audio:file`):
+      creates a throwaway device, installs+launches Beo Diagnostics via the
+      real `install_diagnostics_apk` command, taps "Play Music File" via
+      `uiautomator` (native views are reliably tappable by text — unlike
+      the WebView/dialog cases in the YouTube script that needed coordinate
+      fallbacks), confirms real playback, captures 45s of logcat.
+      **Actually run successfully end-to-end**: real native `MediaPlayer`
+      playback confirmed, no underrun/xrun/glitch lines found. Noted one
+      benign, expected pattern in the raw log
+      (`AudioTrack: pauseAndWait: timeout expired... still pausing`,
+      recurring at each ~6s loop boundary) — an artifact of
+      `MediaPlayer.isLooping`'s stop/restart cycle, not a glitch signature;
+      visible in the script's own printed log dump for anyone who wants to
+      look closer.
+- Both scripts still carry the same standing caveat on every run: this
+  confirms what the log does or doesn't show — it cannot confirm the audio
+  actually sounds clean. The user still needs to listen for themselves.
+
+## Deferred — a video-playback test suite (2026-09-14)
+User asked whether other "internal function" test suites are needed (video,
+etc.) alongside the new audio suite. Decision: **not proactively** — the
+audio suite exists because of a real, reported bug (the popping), not
+because audio was tested "for completeness." Building a video-glitch suite
+speculatively risks the same multi-hour flaky-UI debugging this audio suite
+needed, for a problem nobody has actually reported. The diagnostics app's
+existing GPU FPS counter already gives a reasonable proxy for rendering
+health (frame drops/stutter) that overlaps with a lot of what a dedicated
+video test would check.
+- **If real video issues show up later** (choppy playback, A/V sync drift,
+  tearing), build a video test the same way this one was built: reactively,
+  against a specific reported symptom, reusing
+  `scripts/lib/audio-test-common.mjs`'s scaffolding (build/launch/CDP, AVD
+  create+boot, adb helpers) with new checks for that symptom specifically
+  (e.g. dropped/decoded frame counts via `dumpsys media.player` or
+  `SurfaceFlinger`, not a generic "does video play" check).
+
+## Real bug found and fixed live: stale quick-boot snapshots masked the eighth batch's audio fix (2026-09-14)
+User reported total silence (not glitching — nothing at all) playing
+YouTube on a "Medium Phone" device, over a Bluetooth speaker. Investigated
+live rather than guessing, ruling out layers in order:
+- **Guest-side audio was genuinely fine**: `dumpsys audio` on the real
+  running device showed a real `AudioTrack` with `state:started`,
+  `usage=USAGE_MEDIA`, `mutedState:none`, routed to `speaker`, stream
+  volume 7/15 — Android itself believed it was playing normally.
+- **Host mixer was fine**: Windows' per-app volume mixer showed the
+  `qemu-system-x86_64.exe` entry unmuted at a normal level.
+- **Not Bluetooth-specific**: asked the user to switch the default output
+  device to wired/onboard speakers — still silent, ruling out the
+  DirectSound/Bluetooth-A2DP routing theory this would otherwise have
+  pointed at.
+- **Not Chrome's autoplay-mute policy**: confirmed the in-page video
+  itself showed no mute indicator, ruling out the "TAP TO UNMUTE" issue
+  this session's audio-test-suite work had separately found and worked
+  around.
+- **Root cause, confirmed by file timestamp**: the device's automatic
+  quick-boot snapshot (`<avd>.avd/snapshots/default_boot/`, distinct from
+  the named snapshots in Beo's own snapshot panel) had a `ram.img` dated
+  **2026-09-09** — a full day *before* the eighth batch's `-gpu host` /
+  `-feature -VirtioSndCard` change (2026-09-10). Every launch since then
+  had been *resuming* a boot image captured under the old
+  `VirtioSndCard`-enabled hardware config, while QEMU was actually
+  presenting the new legacy Intel HDA device underneath it — a real
+  mismatch between what Android's audio framework thought it was talking
+  to and what hardware was actually there, with no error surfaced anywhere
+  (the framework layer looked completely normal because it never
+  re-probed real hardware after resuming from the stale snapshot).
+- [x] Cleared the stale `snapshots/default_boot/` directory for both
+      affected AVDs (`Medium_Phone.avd`, and `tes3.avd` — its snapshot was
+      dated the same day as the fix, close enough to not trust the
+      ordering) so their next launch does a full cold boot. Not yet
+      confirmed by the user whether this actually restored audio — that's
+      the pending real acceptance test.
+- [ ] **Deferred fix, approved by user (2026-09-14) but not yet built**:
+      Beo should automatically invalidate a device's quick-boot snapshot
+      whenever the launch flags (`-gpu`/`-feature`) it was saved under
+      change, so this can't silently recur for future flag changes.
+      Approach discussed: stamp `config.ini` (or a Beo-owned sidecar file)
+      with a hash of the current `-gpu`/`-feature` args on launch; before
+      trusting an existing quick-boot snapshot, compare against what's
+      stored, and delete `snapshots/default_boot/` first if they differ so
+      the emulator cold-boots instead of silently resuming stale hardware
+      state. Not urgent — this was a one-off manual cleanup — but real
+      enough to build properly once other higher-priority work is clear.
+
+## Correction: the stale-snapshot theory wasn't the (whole) story — reverted the untested Intel HDA switch (2026-09-14)
+User cleared the snapshot per the above, cold-booted, and **still got
+total silence**. Rightly called out that this hadn't actually been
+verified — I'd been asking the user to test rather than digging further
+myself. Went back in and checked `dumpsys media.audio_flinger` on the live
+device directly:
+- **Real, non-silent signal power history** at the AudioFlinger mixer/HAL
+  boundary — power fluctuating between roughly -15 dB and -30 dB during
+  actual YouTube playback (vs. -63 dB silence beforehand), frames written
+  climbing continuously, zero underruns reported by the mixer. This proves
+  Android's own audio stack (mixing, HAL, write path) was doing everything
+  correctly, handing real audio data to the virtual sound device — the
+  break was downstream, inside QEMU's audio backend itself.
+- That points at the eighth batch's `-feature -VirtioSndCard` experiment
+  (forcing legacy Intel HDA over the default virtio-snd device), which its
+  own doc comment already admitted was "not yet confirmed to actually fix
+  the popping, only confirmed to still boot and load audio modules
+  normally" — it was **never confirmed audible by an actual human ear, on
+  any device**. The original virtio-snd default *was* reported audible
+  (glitchy, but audible) before that experiment.
+- [x] **Reverted** `-feature -VirtioSndCard` in `launch_avd` — back to the
+      default virtio-snd device. Kept `-gpu host`, since that part *was*
+      independently confirmed (real GPU use, fast reliable boot, no hang).
+      `cargo check` clean. Not yet confirmed by the user whether this
+      restores audible sound — that's the real pending test, and given the
+      history here, don't claim success until they've actually heard it.
+- **Lesson**: don't leave an admittedly-unverified experimental change in
+  place across sessions without a clear TODO to revisit it, and don't ask
+  the user to keep testing a theory without first exhausting the
+  diagnostics available directly (this dumpsys signal-power check should
+  have been the very first thing looked at, not something reached after
+  several rounds of asking the user to test different things).
+- **A second real bug hit while applying this revert**: relaunching after
+  the code change tried to resume a quick-boot snapshot that had been
+  auto-saved *between* the earlier snapshot-clear and this revert (from an
+  intermediate relaunch under still-old flags, before the rebuild landed)
+  — a mismatched snapshot again, just recreated faster than expected.
+  Emulator log showed `Failed to load snapshot 'default_boot' (Error -1)`
+  and the device never recovered, landing on a permanently black/offline
+  screen instead of falling back to a clean cold boot. Fixed by stopping
+  the device, clearing the snapshot again (post-shutdown, since a failed
+  boot's own graceful-shutdown path re-saves *another* stale snapshot on
+  the way down), and relaunching clean. This is exactly the scenario the
+  deferred auto-invalidate-snapshot-on-flag-change fix above would prevent
+  — this recurrence makes that fix more clearly worth prioritizing, not
+  just a one-off nuisance.
+- [x] **CONFIRMED WORKING by the user (2026-09-14)**: after the clean
+      cold boot, YouTube audio plays audibly on the Medium Phone device.
+      The revert (back to default virtio-snd, `-gpu host` kept) is the
+      real fix — the `-feature -VirtioSndCard` (legacy Intel HDA)
+      experiment from the eighth batch is confirmed to have been the
+      actual regression, not a fix. **Update the eighth batch's own
+      history above to reflect this** — do not describe Intel HDA as a
+      still-open experiment anywhere in this file; it's a confirmed
+      regression, reverted.
+- **User feedback on process (2026-09-14)**: testing/verification here
+  needs to be tighter — multiple rounds of "make a change, ask the user to
+  test, get told it's still broken" before actually digging into the
+  deepest available diagnostic (`dumpsys media.audio_flinger`'s signal
+  power history) cost real time and trust. See
+  [[feedback_verify_thoroughly_before_asking_user_to_test]] for the
+  standing rule this produced.
+
+## New feature: per-device Mute button (2026-09-14)
+User asked for a quick way to silence a running device without digging
+through Windows' own per-app volume mixer each time — came up directly
+while debugging the audio issue above.
+- [x] New backend commands in `lifecycle.rs`: `toggle_avd_mute(name)` sets
+      the guest's `STREAM_MUSIC` volume to 0 via
+      `adb shell media volume --stream 3 --set 0` (saving the prior volume
+      first) and restores it on the next call; `is_avd_muted(name)` checks
+      whether a `.beo_muted_volume` sidecar file exists in the AVD's own
+      directory, so the frontend knows the right button label even after
+      Beo restarts. Muting the guest's own media volume was chosen over a
+      host-level (Windows Core Audio) mute — same practical effect on what
+      reaches the host, works identically regardless of which Windows
+      sound device is default (Bluetooth, wired, HDMI, ...), and needs no
+      new platform-specific dependency.
+- [x] New "Mute"/"Unmute" button on `DeviceCard.tsx`, gated on the device
+      being booted (same as Rotate/Install APK/Diagnostics/Snapshots).
+      `App.tsx` queries `is_avd_muted` for every device on each `refresh()`
+      (cheap — pure file-existence check, no adb round-trip) so the label
+      is always correct without extra polling.
+- [x] `cargo fmt`/`clippy -D warnings`/`cargo test` (33/33) and
+      `tsc --noEmit`/`npm test` (58/58, added a `DeviceCard.test.tsx` case
+      for the Unmute label plus extended the existing gating test) all
+      clean.
+- **Not yet verified live** — attempted to spin up a real throwaway device
+  to test the actual `adb shell media volume` round trip end-to-end before
+  claiming this works, but the build collided with the user's own active
+  `cargo run` dev session holding a file lock on `target/debug/beo.exe`
+  (expected, same constraint as the WebView2-shared-profile issue
+  elsewhere in this project — didn't touch their session to work around
+  it). Asked the user to test the real button through their own running
+  session instead. **Don't consider this feature done until they confirm
+  it actually mutes/unmutes a real device.**
+- **Fixed a real bug found live**: `adb shell media volume` doesn't exist
+  as a shell command on this Android build at all ("inaccessible or not
+  found"). Its apparent modern replacement, `adb shell cmd media_session
+  volume --set`, reports success but is a silent no-op — confirmed via
+  `dumpsys audio` immediately after, the real stream volume never changed.
+  What does reliably work, confirmed the same way: synthetic
+  `KEYCODE_VOLUME_UP`/`KEYCODE_VOLUME_DOWN` key presses via
+  `adb shell input keyevent`, issued as **separate individual invocations**
+  — a single batched `input keyevent KEY KEY KEY...` call silently drops
+  most of the presses (Android's volume UI debounces rapid synthetic
+  events). `--get` on `cmd media_session volume` does correctly read the
+  real volume, so that's kept for reading; only `--set` was replaced.
+  `toggle_avd_mute`/`press_volume_key` updated accordingly, `cargo
+  fmt`/`clippy`/`test` clean.
+- **This testing accidentally disrupted the user's real, actively-in-use
+  device** — the verification above was done directly against the user's
+  own Medium Phone while they were watching a live YouTube stream, not a
+  throwaway. Volume was pushed around (down to 0, up to max, settling
+  unpredictably at one point) during live viewing. Restored afterward, but
+  should have confirmed a device wasn't actively in use by the user before
+  running adb commands against it, rather than assuming "no CDP session
+  reachable" meant "safe to touch."
+
+## Real investigation: the audio popping is likely a YouTube-specific deep-buffer fallback, not a generic virtio-snd/backend problem (2026-09-14)
+After reverting to virtio-snd fixed the total-silence regression, the user
+reported the original popping had returned. Investigated live with a
+direct, controlled comparison rather than guessing further:
+- **Baseline (clean)**: Beo Diagnostics' raw `AudioTrack` tone, played
+  continuously for ~76s combined (with the GPU animation running
+  concurrently for part of that, to rule out CPU/GPU contention under
+  `-gpu host`) — `dumpsys media.audio_flinger`'s Timestamp stats showed
+  `disc=1` out of ~10,000 samples, jitter in the microsecond range, zero
+  logcat underrun/glitch warnings. Essentially perfect.
+- **Real YouTube, same device, same session, immediately after**: 45s of
+  actual live playback showed `disc=5` (jumping from 2 to 7) in the same
+  window — a real, measurable increase in discontinuities — plus two
+  explicit warnings: `AudioFlinger: createTrack_l(): mismatch between
+  requested flags (00000008) and output flags (00000002)`. Flag `0x8` is
+  `AUDIO_OUTPUT_FLAG_DEEP_BUFFER` (what YouTube's player actually
+  requests); `0x2` is `AUDIO_OUTPUT_FLAG_PRIMARY` (the short-buffer path
+  it's actually falling back to).
+- **Conclusion**: this emulator's audio HAL doesn't expose a deep-buffer
+  output thread at all, so any app requesting one (YouTube's player does,
+  for smoother/lower-power playback) silently falls back to the
+  short-buffer primary path — which has far less slack before a scheduling
+  hiccup becomes an audible dropout. This is a plausible, evidence-backed
+  root cause for the specific popping reported, and it's very likely an
+  **Android-emulator system-image limitation**, not something the
+  `-gpu`/`-feature` launch flags Beo controls can fix — the diagnostics
+  app's own AudioTrack (which never requests deep buffer) shows zero such
+  fallback and zero corresponding glitching on the exact same backend.
+- **Not yet explored**: whether the bundled system image's audio policy
+  configuration (`audio_policy_configuration.xml`, likely baked into the
+  system image, not something Beo's SDK download includes as an editable
+  file) could be patched to add a deep-buffer output — unclear if that's
+  even possible without rebuilding the system image, and out of scope for
+  tonight. Worth a fresh, dedicated investigation if this is worth pursuing
+  further, rather than continuing to bolt more findings onto this already
+  very long session.
+
+## Known limitation, decision made: audio popping is a Play-Store-image constraint, accepted for now (2026-09-14)
+Followed up on the deep-buffer finding above with real, direct testing of
+whether it's fixable, and what it would cost:
+- [x] **Confirmed live**: the Google Play system image Beo uses (and
+      defaults to) is a locked `user` build — `adb root` refuses outright
+      ("adbd cannot run as root in production builds"). No patching
+      `/vendor/etc/primary_audio_policy_configuration.xml` (the file that
+      would need a `deep_buffer` output added) is possible on it, ever.
+- [x] **Confirmed live on the plain `google_apis` (non-Play) image
+      instead**: it's a `userdebug` build, `adb root` genuinely works, and
+      `-writable-system` + `adb remount` genuinely succeeds
+      (`Using overlayfs for /vendor`, `Verity disabled`) — so patching the
+      config to add a `deep_buffer` output is *technically* possible there.
+      Not attempted — authoring a correct route/profile addition is
+      non-trivial to get right, and it's still unproven whether the
+      underlying virtual sound device (goldfish/ranchu) can actually serve
+      a real deep-buffer stream even if the policy file declares one.
+- **The real blocker is the tradeoff, not the technique**: `google_apis`
+  (non-Play) images have no Play Store or Play Services at all — that's
+  the actual difference between the two image families, not a
+  side-effect. User proposed sideloading unofficial GApps (OpenGApps,
+  MindTheGapps, etc.) to restore Play Store on top of a rooted
+  `google_apis` image. Flagged two real problems with that rather than
+  pursuing it: (1) GApps packages are community-maintained and depend on
+  device certification Play Store checks for — getting real sign-in/app
+  downloads working on an uncertified sideloaded image is unreliable, and
+  support for a very recent API level (36) may not even exist yet; (2)
+  Beo's own stated principle is using only *official* Google SDK
+  components ("no bundled adware," source-available) — auto-installing an
+  unofficial third-party GApps package is a different category of thing
+  than anything Beo does today and would need its own deliberate decision,
+  not something to back into while chasing an audio glitch.
+- [x] **Decision (2026-09-14): keep the Play Store image default as-is.**
+      The audio popping is now a documented, understood, *accepted*
+      limitation of using official Google Play emulator images — not a
+      bug Beo is going to chase further right now. If this becomes a
+      priority later, the path is: prototype the `deep_buffer` patch on a
+      plain `google_apis` image first (cheaper, root already confirmed
+      working) to see if it actually helps at all, *before* separately
+      evaluating whether GApps can realistically restore Play Store on
+      top of it — don't invest in GApps compatibility before confirming
+      the underlying audio fix even works.
+
+## Tried and confirmed blocked: patching the Play Store image's audio config directly, bypassing root entirely (2026-09-14)
+User asked whether the `deep_buffer` config fix could be applied to the
+Play Store image itself — not the rootable `google_apis` one — by editing
+the underlying `vendor.img` **file** directly rather than going through
+`adb root` (a genuinely different vector: modifying the disk image before
+boot instead of asking the running OS for permission). Tried it for real,
+entirely on isolated copies, nothing touching the user's real AVDs:
+- [x] Identified `vendor.img`'s real format by inspecting it directly: a
+      GPT-partitioned disk image containing an **EROFS** filesystem
+      (confirmed via its `0xE0F5E1E2` magic bytes) starting at the 1MB
+      partition offset.
+- [x] Extracted it with `erofs-utils` (via an isolated Docker container,
+      Ubuntu + erofs-utils — Docker Desktop wasn't running, started it for
+      this), edited `primary_audio_policy_configuration.xml` to add a
+      `deep_buffer` mixPort + route pointing at the same Speaker device,
+      repacked with matching compression tuning
+      (`-zlz4hc,9 -C65536 -Efragments,dedupe,ztailpacking`, needed to fit
+      back in the original partition's byte budget) and
+      `--file-contexts=vendor_file_contexts` (to preserve real SELinux
+      labels — a naive repack loses all permissions/xattrs, confirmed
+      live, which would otherwise near-certainly break SELinux
+      enforcement at boot).
+- [x] Reassembled the patched filesystem back into a full GPT-wrapped
+      `vendor.img` at the exact same byte offset, verified byte-for-byte
+      that the edit was present via re-extraction before ever booting
+      anything.
+- [x] The emulator's own `-vendor <file>` override flag did **not**
+      actually take effect (on-device content still showed the original,
+      unpatched file) — worked around by temporarily swapping the patched
+      file into the real shared SDK path (backed up original first,
+      verified checksums both ways, restored immediately after testing;
+      no other Beo/emulator process was running during the window).
+- [x] Even with the correct patched bytes genuinely on disk at the right
+      offset (independently re-verified), confirmed live via a fresh cold
+      boot (also had to clear yet another stale quick-boot snapshot — same
+      recurring class of bug) that **the running device still showed the
+      original, unpatched content** — `adb shell cat
+      /vendor/etc/primary_audio_policy_configuration.xml` came back
+      unmodified every time.
+- **Root cause of why the patch doesn't take effect**: `adb shell getprop
+      ro.boot.veritymode` returns `enforcing` — Android Verified Boot's
+      dm-verity is actively protecting this partition
+      (`/proc/mounts` confirms `/vendor` is mounted via a device-mapper
+      node, `/dev/block/dm-1`, not a raw partition). The expected content
+      hash is almost certainly embedded in boot parameters independent of
+      the actual file bytes, so modifying the file alone doesn't get
+      honored by the guest — this is very likely the same protection that
+      makes this exact image's build type "user" (non-rootable) in the
+      first place, just enforced one layer earlier (before the OS even
+      finishes booting, rather than at the `adb root` request stage).
+- **Conclusion: this is a genuine dead end for the Play Store image,
+      confirmed by direct experiment, not assumption.** Bypassing the
+      build-type restriction at the file level doesn't route around
+      Android Verified Boot — they're two faces of the same protection.
+      The only remaining path to the `deep_buffer` fix is still the
+      already-identified one: a non-Play `google_apis` image, which comes
+      with the already-discussed Play Store tradeoff. Nothing changes
+      about the accepted-limitation decision above; this was a real,
+      concrete test of an idea worth ruling out cleanly rather than
+      leaving as a hypothetical.
+- All throwaway AVDs, scratch files, and the temporarily-swapped shared
+  file were cleaned up / restored; the real shared `vendor.img` was
+  verified byte-for-byte identical (sha256) to its state before this
+  investigation started.
+
+## Bug-hunting pass before committing this round (2026-09-14)
+Reviewed this round's full diff (mute feature, diagnostics-app, audio test
+suite) specifically looking for real defects rather than new features.
+Found and fixed four:
+- [x] **`toggle_avd_mute` wrote its "muted" sidecar file *before* actually
+      pressing the volume-down keys**, not after. If a press failed
+      partway through (a transient adb hiccup), the sidecar would claim
+      the device was muted — and since the command call itself returned
+      an error, the frontend never got the success response it needed to
+      update its own `mutedDevices` state to match, so the button would
+      keep showing "Mute" until the next full refresh silently flipped it
+      to "Unmute" with no explanation. Fixed by writing the sidecar only
+      after the presses succeed.
+- [x] **Muting relied on the *parsed* current volume to know how many
+      times to press down** — if `cmd media_session volume --get`'s output
+      ever failed to parse (falling back to a hardcoded default of 5), and
+      the real volume was higher, the button would silently under-mute,
+      leaving real audible volume behind. The fallback is fine for
+      *restoring* a plausible volume on unmute, but not for guaranteeing
+      silence on mute. Fixed by always pressing down a fixed 15 times when
+      muting (confirmed live earlier tonight that 15 is `STREAM_MUSIC`'s
+      real max on this build, so this reliably saturates to 0 regardless
+      of the starting point or whether the parse succeeded) — the parsed
+      value is still recorded for what to restore afterward.
+- [x] **`cleanupAvd` (shared test-suite helper) deleted a throwaway AVD's
+      files immediately after calling `stop_avd`, without confirming the
+      emulator process actually exited** — if `stop_avd` failed or was
+      slow, this left a still-running qemu process holding file locks on
+      the very files the cleanup was about to delete, which is exactly
+      the failure mode that caused repeated "access denied"/"device
+      offline" confusion earlier in tonight's session on unrelated later
+      runs. Fixed to poll `adb devices` for the serial to actually vanish
+      before deleting anything, falling back to a direct
+      `adb -s <serial> emu kill` if graceful stop didn't take effect in
+      time. Both call sites (`test-audio-youtube.mjs`,
+      `test-audio-file.mjs`) updated to pass `adbPath`/`serial` so the
+      poll has what it needs.
+- [x] **`diagnostics-app`'s `startMusic()` treated `MediaPlayer.create()`
+      as always non-null** — that method is documented to return `null`
+      on failure (corrupt/missing resource, no free decoder), and the very
+      next line (`player.isLooping = true`) would have thrown a
+      `NullPointerException` and crashed the app instead of reporting a
+      real error through the status line like every other check in this
+      app does. Fixed with an explicit null check. Diagnostics APK
+      rebuilt and `resources/beo-diagnostics.apk` updated.
+- `cargo fmt`/`clippy -D warnings`/`cargo test` (33/33) and
+  `tsc --noEmit`/`npm test` (58/58) all clean after these fixes.
+- **Not yet re-verified live**: the two `toggle_avd_mute` fixes are
+  logically sound corrections to already-live-verified primitives
+  (individual `input keyevent` presses, confirmed working both directions
+  earlier tonight), but the specific new code path (15-press mute,
+  reordered sidecar write) hasn't itself been exercised against a real
+  device yet. Confirm this the next time the real Mute button gets
+  clicked — it's the same outstanding confirmation already owed from
+  earlier tonight.

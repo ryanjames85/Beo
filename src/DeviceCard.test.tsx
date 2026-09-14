@@ -27,12 +27,17 @@ const baseProps = {
   booted: false,
   orientation: undefined as "portrait" | "landscape" | undefined,
   installingApk: false,
+  installingDiagnostics: false,
+  muted: false,
+  mutingBusy: false,
   snapshotsOpen: false,
   snapshots: [],
   newSnapshotName: "",
   snapshotBusy: false,
   onRotate: noop,
   onInstallApk: noop,
+  onInstallDiagnostics: noop,
+  onToggleMute: noop,
   onToggleSnapshots: noop,
   onLaunch: noop,
   onStop: noop,
@@ -63,16 +68,25 @@ describe("DeviceCard status", () => {
     expect(screen.getByText(/Running/)).toBeInTheDocument();
   });
 
-  it("disables Rotate/Install APK/Snapshots while Starting, but not while Running", () => {
+  it("disables Rotate/Install APK/Diagnostics/Mute/Snapshots while Starting, but not while Running", () => {
     const { rerender } = render(<DeviceCard {...baseProps} running={true} booted={false} />);
     expect(screen.getByRole("button", { name: /Rotate/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Install APK" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Diagnostics" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Mute" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Snapshots" })).toBeDisabled();
 
     rerender(<DeviceCard {...baseProps} running={true} booted={true} />);
     expect(screen.getByRole("button", { name: /Rotate/ })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Install APK" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Diagnostics" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Mute" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Snapshots" })).toBeEnabled();
+  });
+
+  it("shows Unmute once the device is muted", () => {
+    render(<DeviceCard {...baseProps} running={true} booted={true} muted={true} />);
+    expect(screen.getByRole("button", { name: "Unmute" })).toBeInTheDocument();
   });
 
   it("shows real disk usage and RAM, or 'unknown' when unavailable", () => {

@@ -28,12 +28,17 @@ type Props = {
   booted: boolean;
   orientation: "portrait" | "landscape" | undefined;
   installingApk: boolean;
+  installingDiagnostics: boolean;
+  muted: boolean;
+  mutingBusy: boolean;
   snapshotsOpen: boolean;
   snapshots: SnapshotInfo[];
   newSnapshotName: string;
   snapshotBusy: boolean;
   onRotate: (name: string) => void;
   onInstallApk: (name: string) => void;
+  onInstallDiagnostics: (name: string) => void;
+  onToggleMute: (name: string) => void;
   onToggleSnapshots: (name: string) => void;
   onLaunch: (name: string) => void;
   onStop: (name: string) => void;
@@ -55,12 +60,17 @@ export default function DeviceCard({
   booted,
   orientation,
   installingApk,
+  installingDiagnostics,
+  muted,
+  mutingBusy,
   snapshotsOpen,
   snapshots,
   newSnapshotName,
   snapshotBusy,
   onRotate,
   onInstallApk,
+  onInstallDiagnostics,
+  onToggleMute,
   onToggleSnapshots,
   onLaunch,
   onStop,
@@ -120,6 +130,34 @@ export default function DeviceCard({
               title={ready ? "Pick an .apk file to sideload onto this device" : "Available once the device finishes booting"}
             >
               {installingApk ? "Installing…" : "Install APK"}
+            </button>
+          )}
+          {running && (
+            <button
+              onClick={() => onInstallDiagnostics(name)}
+              disabled={!ready || installingDiagnostics}
+              title={
+                ready
+                  ? "Installs and opens Beo's audio/GPU/network/storage diagnostics app"
+                  : "Available once the device finishes booting"
+              }
+            >
+              {installingDiagnostics ? "Installing…" : "Diagnostics"}
+            </button>
+          )}
+          {running && (
+            <button
+              onClick={() => onToggleMute(name)}
+              disabled={!ready || mutingBusy}
+              title={
+                ready
+                  ? muted
+                    ? "Restore this device's previous media volume"
+                    : "Mute this device's media volume — quicker than digging through the host's volume mixer"
+                  : "Available once the device finishes booting"
+              }
+            >
+              {mutingBusy ? "Working…" : muted ? "Unmute" : "Mute"}
             </button>
           )}
           {running && (

@@ -216,6 +216,7 @@ function mockBaseCommands(overrides: Record<string, unknown> = {}) {
     check_hardware_accel: { available: true, backend: "WHPX", detail: "ok" },
     preferred_abi: "x86_64",
     list_running_avds: ["dev1"],
+    is_avd_muted: false,
     check_disk_space: { availableMb: 20000 },
     data_paths: { dataRoot: "C:\\data", avdRoot: "C:\\avd" },
     ...overrides,

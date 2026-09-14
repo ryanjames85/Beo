@@ -244,6 +244,9 @@ export default function App() {
   const [java, setJava] = useState<{ available: boolean; detail: string } | null>(null);
   const [recheckingAccel, setRecheckingAccel] = useState(false);
   const [installingApk, setInstallingApk] = useState<string | null>(null);
+  const [installingDiagnostics, setInstallingDiagnostics] = useState<string | null>(null);
+  const [mutedDevices, setMutedDevices] = useState<Record<string, boolean>>({});
+  const [mutingBusy, setMutingBusy] = useState<string | null>(null);
   const [snapshotsOpen, setSnapshotsOpen] = useState<Record<string, boolean>>({});
   const [snapshots, setSnapshots] = useState<Record<string, SnapshotInfo[]>>({});
   const [newSnapshotName, setNewSnapshotName] = useState<Record<string, string>>({});
@@ -541,7 +544,16 @@ export default function App() {
   async function refresh() {
     logDebug("Refreshing devices, images, profiles, accel status…");
     try {
-      setAvds(await invoke<AvdInfo[]>("list_avds"));
+      const avdList = await invoke<AvdInfo[]>("list_avds");
+      setAvds(avdList);
+      // Mute state lives in a sidecar file on disk (see toggle_avd_mute),
+      // not in-memory — cheap to check for every device on each refresh
+      // regardless of running state, since it's a plain file-existence
+      // check with no adb round-trip involved.
+      const mutedEntries = await Promise.all(
+        avdList.map(async (a) => [a.name, await invoke<boolean>("is_avd_muted", { name: a.name })] as const)
+      );
+      setMutedDevices(Object.fromEntries(mutedEntries));
       setImages(await invoke<string[]>("list_available_images"));
       setProfiles(await invoke<DeviceProfile[]>("list_device_profiles"));
       setAccel(await invoke("check_hardware_accel"));
@@ -748,6 +760,34 @@ export default function App() {
       setLog(explainInstallApkError(raw, name));
     } finally {
       setInstallingApk(null);
+    }
+  }
+
+  async function doInstallDiagnostics(name: string) {
+    logDebug(`Installing Beo Diagnostics on "${name}"`);
+    setInstallingDiagnostics(name);
+    try {
+      const result = await invoke<string>("install_diagnostics_apk", { name });
+      logDebug(`Diagnostics install result for "${name}": ${result}`);
+      setLog(`${result} — check the device screen.`);
+    } catch (e) {
+      fail(`Install Beo Diagnostics on "${name}"`, e);
+    } finally {
+      setInstallingDiagnostics(null);
+    }
+  }
+
+  async function doToggleMute(name: string) {
+    logDebug(`Toggling mute for "${name}"`);
+    setMutingBusy(name);
+    try {
+      const nowMuted = await invoke<boolean>("toggle_avd_mute", { name });
+      setMutedDevices((prev) => ({ ...prev, [name]: nowMuted }));
+      setLog(nowMuted ? `Muted ${name}.` : `Restored ${name}'s previous volume.`);
+    } catch (e) {
+      fail(`Toggle mute on "${name}"`, e);
+    } finally {
+      setMutingBusy(null);
     }
   }
 
@@ -1068,12 +1108,17 @@ export default function App() {
               booted={booted.has(avd.name)}
               orientation={orientation[avd.name]}
               installingApk={installingApk === avd.name}
+              installingDiagnostics={installingDiagnostics === avd.name}
+              muted={!!mutedDevices[avd.name]}
+              mutingBusy={mutingBusy === avd.name}
               snapshotsOpen={!!snapshotsOpen[avd.name]}
               snapshots={snapshots[avd.name] ?? []}
               newSnapshotName={newSnapshotName[avd.name] ?? ""}
               snapshotBusy={snapshotBusy === avd.name}
               onRotate={doRotate}
               onInstallApk={doInstallApk}
+              onInstallDiagnostics={doInstallDiagnostics}
+              onToggleMute={doToggleMute}
               onToggleSnapshots={toggleSnapshots}
               onLaunch={doLaunch}
               onStop={doStop}

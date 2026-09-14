@@ -3,7 +3,8 @@ use super::profiles::category_for_device_id;
 use crate::util::{adb_bin, android_tool, cmdline_tools_bin, emulator_bin};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter};
+use tauri::path::BaseDirectory;
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AvdLogLine {
@@ -293,16 +294,22 @@ pub(crate) fn delete_avd(name: String) -> Result<String, String> {
 /// (KVM/HVF/WHPX) whenever available, falling back to software CPU
 /// emulation otherwise — that part is left alone and unaffected here.
 ///
-/// `-gpu` is deliberately pinned to `swiftshader_indirect` (software
-/// rendering) rather than left as `auto`. `auto` picks `gfxstream` (host
-/// GPU passthrough) when it looks available, but on at least some
-/// virtualized/sandboxed hosts — confirmed by hand here: WHPX genuinely
-/// operational, `-gpu auto` still hangs forever at the boot logo with
-/// `adb` reporting the device "offline" indefinitely, no error, nothing in
-/// the UI to explain it. The same AVD boots fully with
-/// `-gpu swiftshader_indirect` instead — slower rendering, but it actually
-/// works, which beats an indefinite silent hang. This is also Android's
-/// own recommended setting for CI/headless/virtualized environments.
+/// `-gpu` is pinned to `host` (real GPU passthrough via gfxstream) rather
+/// than left as `auto`. This isn't the original choice — `auto` previously
+/// hung forever at the boot logo on this exact host (WHPX genuinely
+/// operational, `adb` reporting the device "offline" indefinitely, no
+/// error), which is why this was pinned to `swiftshader_indirect`
+/// (software rendering) for a long stretch of this project instead: it
+/// worked reliably, just slower, and with audible video-playback audio
+/// glitching under load — software rendering competes with audio for the
+/// same CPU cycles, worse than real GPU rendering does. Re-tested by hand
+/// (not just reasoned about) after that glitching was reported: explicit
+/// `-gpu host` boots this same host fast and reliably (real Radeon GPU via
+/// gfxstream, confirmed in the emulator's own log), unlike `auto`'s
+/// heuristic, which is what actually hung before — `host` was never
+/// re-tried on its own until now. If a hang like the original one ever
+/// recurs on some future host/driver combination, `swiftshader_indirect`
+/// is the known-safe fallback to pin back to.
 /// Clipboard sharing (copy/paste between host and device) is on by default
 /// — matching Android Studio's emulator — and only disabled if requested.
 ///
@@ -338,7 +345,27 @@ pub(crate) fn launch_avd(
         "-avd".to_string(),
         name.clone(),
         "-gpu".to_string(),
-        "swiftshader_indirect".to_string(),
+        "host".to_string(),
+        // Reverted (2026-09-14): this build defaults to VirtioSndCard = on
+        // (a modern paravirtualized virtio-snd device, replacing the older
+        // emulated Intel HDA card — see emulator/lib/advancedFeatures.ini).
+        // An earlier pass here forced `-feature -VirtioSndCard` (legacy
+        // Intel HDA) as an experiment to fix reported popping — but that
+        // was only ever confirmed to still boot and load audio modules,
+        // *never* confirmed to actually produce audible sound by a real
+        // human ear. Investigated live after a *total silence* report on a
+        // different device: `dumpsys media.audio_flinger` showed a real,
+        // varying, non-silent signal power history at the AudioFlinger
+        // mixer/HAL boundary (proving Android's own audio stack was doing
+        // everything right, all the way to the virtual sound device), with
+        // zero underruns — meaning the break was downstream, inside QEMU's
+        // audio backend itself, specifically under the untested Intel HDA
+        // path. The original virtio-snd default was reported audible
+        // (if glitchy) before this experiment; there is no equivalent
+        // confirmation the Intel HDA path is audible at all on this host.
+        // Reverting to virtio-snd (silence is a far worse UX than glitchy
+        // audio) — `-gpu host` is kept since that part *was* independently
+        // confirmed to still boot reliably and use the real GPU.
     ];
     if headless {
         args.push("-no-window".to_string());
@@ -646,6 +673,172 @@ pub(crate) fn install_apk(name: String, apk_path: String) -> Result<String, Stri
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Whether `toggle_avd_mute` has muted this device — used by the frontend
+/// to show the right button label on load, since the mute state itself
+/// lives in a sidecar file (see `toggle_avd_mute`), not in-memory, and so
+/// needs to be queryable independently of the toggle action itself.
+#[tauri::command]
+pub(crate) fn is_avd_muted(name: String) -> bool {
+    avd_dir(&name)
+        .map(|dir| dir.join(".beo_muted_volume").exists())
+        .unwrap_or(false)
+}
+
+/// Presses a hardware volume key `count` times via separate, individual
+/// `adb shell input keyevent` invocations. Confirmed live this has to be
+/// separate calls, not a single `input keyevent KEY KEY KEY...` batch —
+/// that batched form silently drops most of the presses (Android's volume
+/// UI debounces rapid synthetic key events arriving faster than it can
+/// process them), which looked at first like the whole approach was
+/// broken until per-press round-trips (each with its own real adb-shell
+/// latency) were confirmed to land reliably.
+fn press_volume_key(serial: &str, keycode: &str, count: u32) -> Result<(), String> {
+    for _ in 0..count {
+        let out = android_tool(adb_bin())
+            .args(["-s", serial, "shell", "input", "keyevent", keycode])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Mutes or restores a running device's Android media volume —
+/// requested after a real audio investigation made it clear there's no
+/// quick way to silence a running AVD without digging through Windows'
+/// own per-app volume mixer each time. Lowering `STREAM_MUSIC` (index 3)
+/// to 0 has the same practical effect on what reaches the host as turning
+/// the phone's own volume down, and works identically regardless of which
+/// Windows sound device is default (Bluetooth, wired, HDMI, ...) — a
+/// host-level (Windows Core Audio) mute would need a new
+/// platform-specific dependency for no real benefit here.
+///
+/// Confirmed live that `adb shell media volume` (the first approach here)
+/// doesn't exist as a shell command on this Android build at all
+/// ("inaccessible or not found"), and its apparent modern replacement,
+/// `adb shell cmd media_session volume --set`, silently no-ops — `--get`
+/// reads the real stream volume correctly, but `--set` reports success
+/// while leaving the actual volume completely unchanged (confirmed via
+/// `dumpsys audio` immediately after). What does reliably work, confirmed
+/// the same way: synthetic `KEYCODE_VOLUME_UP`/`KEYCODE_VOLUME_DOWN` key
+/// presses, which is what a real volume rocker sends and so goes through
+/// the same path `AudioService` has always handled.
+///
+/// The pre-mute volume is stored in a small sidecar file inside the AVD's
+/// own directory (`.beo_muted_volume`) rather than in-memory Tauri state,
+/// so unmuting still restores the right volume even if Beo itself was
+/// restarted in between — and `is_avd_muted` above just checks whether
+/// that file exists, giving the frontend a simple, restart-safe signal.
+#[tauri::command]
+pub(crate) fn toggle_avd_mute(name: String) -> Result<bool, String> {
+    let serial = find_serial_for_avd(&name)?;
+    let sidecar = avd_dir(&name)
+        .ok_or_else(|| "couldn't resolve this AVD's directory".to_string())?
+        .join(".beo_muted_volume");
+
+    if sidecar.exists() {
+        let prev: u32 = std::fs::read_to_string(&sidecar)
+            .map_err(|e| e.to_string())?
+            .trim()
+            .parse()
+            .unwrap_or(5);
+        press_volume_key(&serial, "KEYCODE_VOLUME_UP", prev)?;
+        std::fs::remove_file(&sidecar).map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        let get_out = android_tool(adb_bin())
+            .args([
+                "-s",
+                &serial,
+                "shell",
+                "cmd",
+                "media_session",
+                "volume",
+                "--stream",
+                "3",
+                "--get",
+            ])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !get_out.status.success() {
+            return Err(String::from_utf8_lossy(&get_out.stderr).to_string());
+        }
+        // Real output includes a line like "volume is X in range [0..Y]" —
+        // used to remember what to restore on unmute. Falls back to a
+        // reasonable mid-range default if that format ever changes, since
+        // failing to *restore* a plausible volume is a much smaller
+        // problem than failing to *mute* would be.
+        let text = String::from_utf8_lossy(&get_out.stdout);
+        let current: u32 = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("volume is "))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+
+        // Always press enough times to reach 0 regardless of `current` —
+        // STREAM_MUSIC's max index has never been observed above 15 on
+        // this build, so 15 presses guarantees real silence even if the
+        // parse above fell back to its default (which, unlike here, isn't
+        // safe to rely on for *muting*: understating the real volume would
+        // leave it audible, defeating the whole point of this button).
+        press_volume_key(&serial, "KEYCODE_VOLUME_DOWN", 15)?;
+        // Only persist "muted" once the device is actually confirmed
+        // silenced — writing this first (the original approach) left the
+        // sidecar claiming a mute that might have only partially applied
+        // if a press failed partway through, with the frontend never
+        // finding out since the command call above would have already
+        // returned an error before reaching here.
+        std::fs::write(&sidecar, current.to_string()).map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
+/// Installs and launches Beo's own bundled diagnostics app (see
+/// `diagnostics-app/` at the repo root) — audio/GPU/network/storage checks
+/// with a controlled, repeatable signal for each, built specifically
+/// because comparing behavior across `-gpu`/`-feature` emulator flag
+/// experiments by ear/eye alone wasn't reliable. Unlike `install_apk`,
+/// there's no file picker: the APK is bundled with Beo itself
+/// (`tauri.conf.json`'s `bundle.resources`), so this resolves its own path
+/// via Tauri's resource resolver rather than taking one as an argument.
+#[tauri::command]
+pub(crate) fn install_diagnostics_apk(app: AppHandle, name: String) -> Result<String, String> {
+    let serial = find_serial_for_avd(&name)?;
+    let apk_path = app
+        .path()
+        .resolve("resources/beo-diagnostics.apk", BaseDirectory::Resource)
+        .map_err(|e| e.to_string())?;
+    let apk_path = apk_path.to_string_lossy().to_string();
+
+    let install_out = android_tool(adb_bin())
+        .args(["-s", &serial, "install", "-r", &apk_path])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !install_out.status.success() {
+        return Err(String::from_utf8_lossy(&install_out.stderr).to_string());
+    }
+
+    let start_out = android_tool(adb_bin())
+        .args([
+            "-s",
+            &serial,
+            "shell",
+            "am",
+            "start",
+            "-n",
+            "org.beo.diagnostics/.MainActivity",
+        ])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !start_out.status.success() {
+        return Err(String::from_utf8_lossy(&start_out.stderr).to_string());
+    }
+    Ok("Installed and launched Beo Diagnostics".into())
 }
 
 #[cfg(test)]

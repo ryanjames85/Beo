@@ -40,6 +40,51 @@ jobs:
             Beo-windows.msi
             Beo-windows-setup.exe
 
+  # Separate job (not a matrix leg on `build`) since Linux needs its own
+  # system deps and a bash-based artifact-collection step rather than
+  # PowerShell — trying to share one job across both shells was messier
+  # than just having two. Linux artifacts skip the `sign` job entirely:
+  # SignPath signs Windows PE binaries specifically, appimage/deb don't
+  # need (or support) that kind of signing.
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build release bundle
+        run: npm run tauri build
+
+      - name: Collect and rename installer artifacts
+        run: |
+          set -eu
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' | head -1)
+          deb=$(find src-tauri/target/release/bundle/deb -name '*.deb' | head -1)
+          if [ -z "$appimage" ]; then echo "No .AppImage found under src-tauri/target/release/bundle/appimage" >&2; exit 1; fi
+          if [ -z "$deb" ]; then echo "No .deb found under src-tauri/target/release/bundle/deb" >&2; exit 1; fi
+          cp "$appimage" Beo-linux.AppImage
+          cp "$deb" Beo-linux.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-linux
+          path: |
+            Beo-linux.AppImage
+            Beo-linux.deb
+
   # Signs the installers via SignPath's free OSS code-signing program
   # (https://about.signpath.io/product/open-source) — the same approach
   # already proven on this author's other project. Skipped cleanly (not
@@ -99,7 +144,7 @@ jobs:
           overwrite: true
 
   release:
-    needs: [build, sign]
+    needs: [build, sign, build-linux]
     runs-on: windows-latest
     permissions:
       contents: write
@@ -107,6 +152,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: installers
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: installers-linux
 
       - name: Create GitHub release
         shell: pwsh
@@ -119,12 +168,16 @@ jobs:
           Windows: run `Beo-windows-setup.exe` (recommended) or `Beo-windows.msi`.
           The installer upgrades any existing install in place.
 
+          Linux: run `Beo-linux.AppImage` directly (make it executable first:
+          `chmod +x Beo-linux.AppImage`), or install `Beo-linux.deb` on
+          Debian/Ubuntu-based distros.
+
           Beo is source-available under PolyForm Shield 1.0.0 — free to use for
           any purpose, including commercially. See LICENSE.
           "@ | Set-Content -Encoding utf8 release-notes.md
 
           gh release create "$env:GITHUB_REF_NAME" `
-            Beo-windows.msi Beo-windows-setup.exe `
+            Beo-windows.msi Beo-windows-setup.exe Beo-linux.AppImage Beo-linux.deb `
             --title "Beo $env:GITHUB_REF_NAME" `
             --notes-file release-notes.md `
             --draft
