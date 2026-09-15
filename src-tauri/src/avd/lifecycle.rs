@@ -242,6 +242,15 @@ pub(crate) fn create_avd(name: String, image_id: String, device: String) -> Resu
     // one thing standing between "type normally" and "click a tiny toggle
     // first, every session."
     let _ = set_avd_config_value(&name, "hw.keyboard", "yes");
+    // avdmanager's own per-profile default (1536 MB for pixel/pixel_6) is
+    // tight for real-world use — confirmed live: a throwaway device on
+    // that default genuinely ran out of memory playing a single YouTube
+    // tab in Chrome (lowmemorykiller actively reaping processes, Chrome's
+    // main process itself killed moments later), while a device created
+    // outside Beo with 2048 MB handled the same workload fine all night.
+    // 2048 MB matches that already-proven-stable allocation rather than
+    // guessing at a number.
+    let _ = set_avd_config_value(&name, "hw.ramSize", "2048");
     Ok(format!("Created {name}"))
 }
 
@@ -686,6 +695,31 @@ pub(crate) fn is_avd_muted(name: String) -> bool {
         .unwrap_or(false)
 }
 
+/// Parses `adb shell cmd media_session volume --get`'s real output to
+/// recover the current stream volume — used to remember what to *restore*
+/// on unmute. Falls back to a reasonable mid-range default if the format
+/// ever changes, since failing to restore a plausible volume is a much
+/// smaller problem than failing to mute would be (muting itself always
+/// presses down a fixed, safe count regardless of this value — see
+/// `toggle_avd_mute`). Split out so this parsing can be unit tested against
+/// real captured output without needing a live device.
+///
+/// Confirmed live this needed a real regression test, not just eyeballing
+/// raw adb output: the real output line is prefixed with `"[V] "` (e.g.
+/// `"[V] volume is 11 in range [0..15]"`), which an earlier version of
+/// this parser — anchored on `strip_prefix("volume is ")`, requiring an
+/// exact match at the start of the line — never actually matched. It was
+/// silently falling back to the default on every single real call; nothing
+/// caught it until a test using real captured output was added.
+fn parse_media_session_volume(stdout: &[u8]) -> u32 {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .find_map(|l| l.split_once("volume is ").map(|(_, rest)| rest))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(5)
+}
+
 /// Presses a hardware volume key `count` times via separate, individual
 /// `adb shell input keyevent` invocations. Confirmed live this has to be
 /// separate calls, not a single `input keyevent KEY KEY KEY...` batch —
@@ -767,18 +801,7 @@ pub(crate) fn toggle_avd_mute(name: String) -> Result<bool, String> {
         if !get_out.status.success() {
             return Err(String::from_utf8_lossy(&get_out.stderr).to_string());
         }
-        // Real output includes a line like "volume is X in range [0..Y]" —
-        // used to remember what to restore on unmute. Falls back to a
-        // reasonable mid-range default if that format ever changes, since
-        // failing to *restore* a plausible volume is a much smaller
-        // problem than failing to *mute* would be.
-        let text = String::from_utf8_lossy(&get_out.stdout);
-        let current: u32 = text
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("volume is "))
-            .and_then(|rest| rest.split_whitespace().next())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
+        let current = parse_media_session_volume(&get_out.stdout);
 
         // Always press enough times to reach 0 regardless of `current` —
         // STREAM_MUSIC's max index has never been observed above 15 on
@@ -907,5 +930,37 @@ mod tests {
     fn parse_size_to_mb_rejects_garbage() {
         assert_eq!(parse_size_to_mb(""), None);
         assert_eq!(parse_size_to_mb("not a number"), None);
+    }
+
+    // Real `adb shell cmd media_session volume --get` output, captured live
+    // from an actual running device this session — mixed in among other
+    // `[V]`-prefixed verbose logging, not on its own line by itself.
+    const REAL_VOLUME_GET_OUTPUT: &[u8] = b"[V] will control stream=3 (STREAM_MUSIC)\n[V] will get volume\n[V] Connecting to AudioService\n[V] volume is 11 in range [0..15]\n";
+
+    #[test]
+    fn parse_media_session_volume_matches_real_output() {
+        assert_eq!(parse_media_session_volume(REAL_VOLUME_GET_OUTPUT), 11);
+    }
+
+    #[test]
+    fn parse_media_session_volume_handles_zero() {
+        assert_eq!(
+            parse_media_session_volume(b"[V] volume is 0 in range [0..15]\n"),
+            0
+        );
+    }
+
+    // Falls back to a mid-range default rather than 0 — confirmed live this
+    // matters: the fallback here is only ever used to decide what to
+    // *restore* on unmute (muting itself always uses a fixed safe press
+    // count regardless), and restoring to silence would be a worse outcome
+    // than restoring to a plausible non-zero guess.
+    #[test]
+    fn parse_media_session_volume_falls_back_to_default_on_unexpected_format() {
+        assert_eq!(parse_media_session_volume(b""), 5);
+        assert_eq!(
+            parse_media_session_volume(b"not the expected output at all"),
+            5
+        );
     }
 }

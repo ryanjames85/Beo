@@ -1348,3 +1348,61 @@ Found and fixed four:
   device yet. Confirm this the next time the real Mute button gets
   clicked — it's the same outstanding confirmation already owed from
   earlier tonight.
+
+## Two real bugs found live, then a regression-testing pass that caught a third (2026-09-15)
+User created a real device ("wow") through Beo's own UI, launched it, and
+found two things:
+- **Beo showed it as "Stopped" and "0 MB" while it was genuinely running
+  with 5GB of real data** — confirmed live: `refresh()` only ever ran on
+  mount and after create/delete, with no periodic re-check, so any change
+  to reality after the last refresh (a device finishing boot, disk usage
+  growing) went stale indefinitely until some other action happened to
+  trigger a re-fetch. [x] Fixed: added a 10s polling interval while the
+  dashboard view is active (`src/App.tsx`), cleared on unmount/view
+  change. New test added (`App.test.tsx`, "dashboard polling") — verified
+  it actually fails without the fix (temporarily set the interval to an
+  effectively-infinite delay, confirmed the test caught it, reverted).
+- **Chrome crashed while playing music** — investigated live via logcat
+  rather than assuming it was related to any audio setting:
+  `lowmemorykiller` was actively reaping processes at the exact moment
+  Chrome's main process died. Root cause: this device (like the other
+  throwaways created tonight) only had 1536 MB RAM — avdmanager's own
+  default for the `pixel`/`pixel_6` profile — while `Medium_Phone`
+  (2048 MB, created outside Beo) handled the same workload fine all
+  night. [x] Fixed: `create_avd` now explicitly sets `hw.ramSize = 2048`
+  for every device Beo creates, matching the already-proven-stable
+  allocation instead of trusting avdmanager's tighter default.
+- Also confirmed the existing low-disk-space warning (`LOW_DISK_SPACE_MB`,
+  triggers under 8GB free) already covers what was asked for — it now
+  additionally benefits from the same 10s polling fix above, since
+  `checkDiskSpace()` lives inside `refresh()`.
+- **Expanded regression testing per explicit request, and it immediately
+  found a real, previously-shipped bug**: extracted `toggle_avd_mute`'s
+  inline "volume is X in range [0..Y]" parsing into a standalone
+  `parse_media_session_volume()` function specifically so it could be unit
+  tested against real captured adb output (`src-tauri/src/avd/lifecycle.rs`).
+  The first test run **failed** — the real output line is prefixed with
+  `"[V] "` (e.g. `"[V] volume is 11 in range [0..15]"`), which the
+  original `strip_prefix("volume is ")` (anchored at the start of the
+  line) never actually matched. This means **the "restore previous volume
+  on unmute" behavior had been silently broken since it was written
+  tonight** — every unmute would have restored to the hardcoded fallback
+  default (5) instead of the device's real prior volume, and nothing had
+  caught it because earlier manual verification only ever eyeballed raw
+  adb output directly, never exercised this exact parsing logic. [x]
+  Fixed: switched to `split_once("volume is ")` (matches anywhere in the
+  line, not just at the start). 3 new tests added using real captured
+  output, confirmed passing after the fix.
+- Also fixed a doc-comment ordering bug introduced by the extraction
+  itself: `press_volume_key`'s docstring had become detached and
+  orphaned onto `parse_media_session_volume` (no blank-line/code
+  separation between them meant Rust attached both doc blocks to
+  whichever function came last) — reordered so each function's docs sit
+  directly above it again.
+- `cargo fmt`/`clippy -D warnings`/`cargo test` (36/36, up from 33) and
+  `tsc --noEmit`/`npm test` (59/59, up from 58) all clean.
+- **Mute/unmute still needs a real end-to-end live confirmation** — the
+  volume-restore bug above was caught and fixed at the unit-test level,
+  but the full `toggle_avd_mute` round trip (mute, then unmute, on a real
+  device) hasn't been re-verified live since. Don't consider this feature
+  done until that happens.

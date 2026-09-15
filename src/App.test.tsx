@@ -300,3 +300,27 @@ describe("App — log auto-dismiss", () => {
     vi.useRealTimers();
   });
 });
+
+describe("App — dashboard polling", () => {
+  it("re-fetches device state periodically instead of only once on mount", async () => {
+    // Confirmed live as a real bug: without this polling, a device that
+    // finished booting (or grew on disk) after the initial load stayed
+    // stuck showing stale data indefinitely — nothing re-checked ground
+    // truth unless the user happened to trigger a create/delete or leave
+    // and return to the view.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockBaseCommands();
+    render(<App />);
+    await screen.findByText("dev1");
+
+    const callsBeforePoll = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "list_avds").length;
+    expect(callsBeforePoll).toBeGreaterThan(0);
+
+    vi.advanceTimersByTime(10000);
+    await vi.waitFor(() => {
+      const callsAfterPoll = mockedInvoke.mock.calls.filter(([cmd]) => cmd === "list_avds").length;
+      expect(callsAfterPoll).toBeGreaterThan(callsBeforePoll);
+    });
+    vi.useRealTimers();
+  });
+});

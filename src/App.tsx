@@ -524,6 +524,23 @@ export default function App() {
     if (view === "dashboard") refresh();
   }, [view]);
 
+  // `refresh()` otherwise only runs on mount and after specific actions
+  // (create/delete) — confirmed live as a real bug: a device launched via
+  // its own Launch button updates local state immediately, but if nothing
+  // else ever triggers a re-fetch afterward, the dashboard can go stale
+  // indefinitely once that optimistic state and reality diverge (e.g. a
+  // dev-mode hot-reload remounting the app mid-boot, before the device had
+  // actually attached to adb yet) — a real device kept showing "Stopped"
+  // and "0 MB" long after it had genuinely finished booting and grown to
+  // several GB, with nothing in the UI ever correcting it. Polling while
+  // the dashboard is visible keeps it reconciled against ground truth
+  // instead of only trusting whatever the last specific action reported.
+  useEffect(() => {
+    if (view !== "dashboard") return;
+    const interval = setInterval(refresh, 10000);
+    return () => clearInterval(interval);
+  }, [view]);
+
   // A success message ("Created X", "Installed on Y") used to sit in the
   // log block indefinitely — until the *next* action overwrote it — which
   // reads as stale, stuck-feeling UI for something that already happened
