@@ -28,7 +28,26 @@ type DeveloperProps = {
   images: string[];
   profiles: DeviceProfile[];
   abi: string;
+  ramMb: number;
+  onRamMbChange: (v: number) => void;
+  // null while still loading, or if it couldn't be determined at all —
+  // the slider falls back to a conservative cap rather than an
+  // unconstrained one in that case, since unlike disk space a RAM
+  // ceiling that's too high can actually starve the host.
+  hostRamMb: number | null;
+  diskGb: number;
+  onDiskGbChange: (v: number) => void;
 };
+
+// Below this, real-world use (a browser tab, background Google services)
+// has been confirmed live to run out of memory and crash — see
+// lifecycle.rs's create_avd. Above this, letting the slider go past half
+// the host's own RAM risks starving the host itself; 8192 is a reasonable
+// hard ceiling on hosts whose RAM couldn't be detected at all.
+const MIN_RAM_MB = 2048;
+const FALLBACK_MAX_RAM_MB = 8192;
+const MIN_DISK_GB = 6;
+const MAX_DISK_GB = 64;
 
 type Props = SimpleProps | DeveloperProps;
 
@@ -120,7 +139,13 @@ export default function CreateDeviceForm(props: Props) {
     images,
     profiles,
     abi,
+    ramMb,
+    onRamMbChange,
+    hostRamMb,
+    diskGb,
+    onDiskGbChange,
   } = props;
+  const maxRamMb = hostRamMb ? Math.max(MIN_RAM_MB, Math.floor(hostRamMb / 2)) : FALLBACK_MAX_RAM_MB;
 
   return (
     <section>
@@ -176,6 +201,36 @@ export default function CreateDeviceForm(props: Props) {
               ))}
           </optgroup>
         </select>
+        <label className="slider-row">
+          <span>
+            RAM: {ramMb} MB{ramMb === MIN_RAM_MB ? " (minimum — lower has crashed real apps)" : ""}
+          </span>
+          <input
+            type="range"
+            min={MIN_RAM_MB}
+            max={maxRamMb}
+            step={256}
+            value={ramMb}
+            onChange={(e) => onRamMbChange(Number(e.target.value))}
+            title={
+              hostRamMb
+                ? `This host has ${(hostRamMb / 1024).toFixed(1)} GB RAM — capped at half of it so one device can't starve the rest of your machine`
+                : "Host RAM couldn't be detected — capped at a conservative default"
+            }
+          />
+        </label>
+        <label className="slider-row">
+          <span>Storage: {diskGb} GB</span>
+          <input
+            type="range"
+            min={MIN_DISK_GB}
+            max={MAX_DISK_GB}
+            step={2}
+            value={diskGb}
+            onChange={(e) => onDiskGbChange(Number(e.target.value))}
+            title="A dynamically-growing virtual disk — this sets the ceiling, not space reserved upfront on your real drive"
+          />
+        </label>
         <button
           className="primary create-btn"
           disabled={creating}

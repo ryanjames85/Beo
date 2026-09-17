@@ -1,6 +1,6 @@
 use super::naming::sanitize_avd_name;
 use super::profiles::category_for_device_id;
-use crate::util::{adb_bin, android_tool, cmdline_tools_bin, emulator_bin};
+use crate::util::{adb_bin, android_tool, cmdline_tools_bin, emulator_bin, recommended_ram_mb};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::path::BaseDirectory;
@@ -204,7 +204,13 @@ pub(crate) fn list_avds() -> Result<Vec<AvdInfo>, String> {
 }
 
 #[tauri::command]
-pub(crate) fn create_avd(name: String, image_id: String, device: String) -> Result<String, String> {
+pub(crate) fn create_avd(
+    name: String,
+    image_id: String,
+    device: String,
+    ram_mb: Option<u32>,
+    disk_gb: Option<u32>,
+) -> Result<String, String> {
     let name = sanitize_avd_name(&name)?;
     let mut child = android_tool(cmdline_tools_bin("avdmanager"))
         .args(["create", "avd", "-n", &name, "-k", &image_id, "-d", &device])
@@ -248,9 +254,28 @@ pub(crate) fn create_avd(name: String, image_id: String, device: String) -> Resu
     // tab in Chrome (lowmemorykiller actively reaping processes, Chrome's
     // main process itself killed moments later), while a device created
     // outside Beo with 2048 MB handled the same workload fine all night.
-    // 2048 MB matches that already-proven-stable allocation rather than
-    // guessing at a number.
-    let _ = set_avd_config_value(&name, "hw.ramSize", "2048");
+    // No caller-specified value (Simple mode has no slider at all;
+    // Developer mode before the slider is touched) falls back to
+    // `recommended_ram_mb()` rather than a single flat number for every
+    // host — Simple mode users never see a slider, so the one chance to
+    // give them more than the bare-minimum floor is picking a smarter
+    // automatic default based on what their machine can actually spare.
+    let ram_mb = ram_mb.unwrap_or_else(recommended_ram_mb);
+    let _ = set_avd_config_value(&name, "hw.ramSize", &ram_mb.to_string());
+    // avdmanager's own default (6G) leaves almost no real headroom —
+    // confirmed live: a freshly booted device, before the user had
+    // installed or updated anything themselves, already showed /data at
+    // 84% full (4.9G of 6G used, ~1G free) purely from the Google Play
+    // image's own bundled apps and services. That little free space is
+    // exactly what "can't even update the apps on the image" looks like —
+    // Play Store updates need real staging room. Chosen generously (16G,
+    // leaving ~11G of real headroom on top of that same baseline
+    // footprint) rather than just barely enough: this is a dynamically
+    // growing virtual disk, not pre-allocated, so a bigger ceiling costs
+    // no real host disk upfront — actual usage still only ever reflects
+    // what's genuinely stored, same as the 6G default already did.
+    let disk_gb = disk_gb.unwrap_or(16);
+    let _ = set_avd_config_value(&name, "disk.dataPartition.size", &format!("{disk_gb}G"));
     Ok(format!("Created {name}"))
 }
 

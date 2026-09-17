@@ -51,6 +51,7 @@ pub fn run() {
             avd::toggle_avd_mute,
             util::nuke_all,
             util::check_disk_space,
+            util::host_ram_mb,
             util::data_paths,
         ])
         .run(tauri::generate_context!())

@@ -279,6 +279,88 @@ pub(crate) fn check_disk_space() -> DiskSpaceStatus {
     }
 }
 
+/// Total host RAM (best-effort), used to bound the RAM slider on device
+/// creation — unlike disk space, a bigger RAM ceiling has a real cost (it's
+/// actually reserved by the running emulator process), so the frontend
+/// needs a real number to cap against rather than letting someone pick a
+/// value that starves their own machine. `None` if it can't be determined,
+/// same "don't guess" convention as `check_disk_space`.
+#[tauri::command]
+pub(crate) fn host_ram_mb() -> Option<u64> {
+    total_ram_mb()
+}
+
+/// The automatic RAM allocation for a new device when nothing more specific
+/// was requested — used by `create_avd` for Simple mode (which has no
+/// slider at all) and as Developer mode's own starting point before the
+/// slider is touched. 2048 MB is the confirmed-stable floor (a real
+/// throwaway crashed at 1536 MB playing a single YouTube tab). On a host
+/// with real headroom to spare, that floor is needlessly conservative —
+/// modern real phones ship with far more than 2GB — so this checks actual
+/// host RAM and offers more on hosts that can spare it, rather than
+/// picking one fixed number for every machine Beo runs on.
+pub(crate) fn recommended_ram_mb() -> u32 {
+    ram_mb_for_host_total(total_ram_mb())
+}
+
+/// The actual decision behind `recommended_ram_mb`, split out from the real
+/// host-RAM detection so it can be unit tested against specific inputs
+/// without needing to run on a machine with a particular amount of RAM.
+fn ram_mb_for_host_total(host_total_mb: Option<u64>) -> u32 {
+    const FLOOR_MB: u32 = 2048;
+    const GENEROUS_MB: u32 = 4096;
+    const GENEROUS_THRESHOLD_MB: u64 = 16384; // 16 GB host RAM or more
+
+    match host_total_mb {
+        Some(host_mb) if host_mb >= GENEROUS_THRESHOLD_MB => GENEROUS_MB,
+        _ => FLOOR_MB,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn total_ram_mb() -> Option<u64> {
+    let out = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+        ])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|bytes| bytes / 1_048_576)
+}
+
+#[cfg(target_os = "macos")]
+fn total_ram_mb() -> Option<u64> {
+    let out = Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|bytes| bytes / 1_048_576)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn total_ram_mb() -> Option<u64> {
+    let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = contents
+        .lines()
+        .find_map(|l| l.strip_prefix("MemTotal:"))?
+        .trim()
+        .strip_suffix("kB")?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(kb / 1024)
+}
+
 #[cfg(target_os = "windows")]
 fn free_space_mb(path: &std::path::Path) -> Option<u64> {
     // Escaped for embedding in a PowerShell single-quoted string literal.
@@ -390,5 +472,33 @@ mod tests {
         assert!(result.unwrap_err().contains("Checksum mismatch"));
         // A failed download shouldn't be left on disk looking installable.
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn ram_mb_for_host_total_uses_floor_below_threshold() {
+        assert_eq!(ram_mb_for_host_total(Some(8192)), 2048);
+    }
+
+    #[test]
+    fn ram_mb_for_host_total_uses_floor_just_under_threshold() {
+        assert_eq!(ram_mb_for_host_total(Some(16383)), 2048);
+    }
+
+    #[test]
+    fn ram_mb_for_host_total_is_generous_at_threshold() {
+        assert_eq!(ram_mb_for_host_total(Some(16384)), 4096);
+    }
+
+    #[test]
+    fn ram_mb_for_host_total_is_generous_well_above_threshold() {
+        assert_eq!(ram_mb_for_host_total(Some(32768)), 4096);
+    }
+
+    #[test]
+    fn ram_mb_for_host_total_uses_floor_when_undetected() {
+        // Confirmed live this matters: can't tell a host has plenty of
+        // spare RAM if the detection itself failed — the safe floor
+        // (not the generous value) is the only sound default here.
+        assert_eq!(ram_mb_for_host_total(None), 2048);
     }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import CreateDeviceForm from "./CreateDeviceForm";
 
 function noop() {}
@@ -113,25 +113,30 @@ describe("CreateDeviceForm — Developer mode", () => {
     { id: "pixel_tablet", label: "Pixel Tablet", category: "tablet" },
   ];
 
+  const baseDeveloperProps = {
+    mode: "developer" as const,
+    newName: "",
+    onNewNameChange: noop,
+    creating: false,
+    onCreate: noop,
+    playStore: true,
+    onPlayStoreChange: noop,
+    selectedImage: "",
+    onSelectedImageChange: noop,
+    device: "pixel_6",
+    onDeviceChange: noop,
+    images,
+    profiles,
+    abi: "x86_64",
+    ramMb: 2048,
+    onRamMbChange: noop,
+    hostRamMb: null,
+    diskGb: 16,
+    onDiskGbChange: noop,
+  };
+
   it("renders the full image/device picker, not the Simple mode toggle", () => {
-    render(
-      <CreateDeviceForm
-        mode="developer"
-        newName=""
-        onNewNameChange={noop}
-        creating={false}
-        onCreate={noop}
-        playStore={true}
-        onPlayStoreChange={noop}
-        selectedImage=""
-        onSelectedImageChange={noop}
-        device="pixel_6"
-        onDeviceChange={noop}
-        images={images}
-        profiles={profiles}
-        abi="x86_64"
-      />
-    );
+    render(<CreateDeviceForm {...baseDeveloperProps} />);
     expect(screen.getByText(/Select system image/)).toBeInTheDocument();
     expect(screen.getByText("Pixel 6")).toBeInTheDocument();
     expect(screen.getByText("Pixel Tablet")).toBeInTheDocument();
@@ -139,24 +144,41 @@ describe("CreateDeviceForm — Developer mode", () => {
   });
 
   it("flags a non-host-ABI image in its label", () => {
+    render(<CreateDeviceForm {...baseDeveloperProps} />);
+    expect(screen.getByText(/arm64-v8a \(not x86_64/)).toBeInTheDocument();
+  });
+
+  it("shows current RAM/storage values and reports slider changes", () => {
+    const onRamMbChange = vi.fn();
+    const onDiskGbChange = vi.fn();
     render(
       <CreateDeviceForm
-        mode="developer"
-        newName=""
-        onNewNameChange={noop}
-        creating={false}
-        onCreate={noop}
-        playStore={true}
-        onPlayStoreChange={noop}
-        selectedImage=""
-        onSelectedImageChange={noop}
-        device="pixel_6"
-        onDeviceChange={noop}
-        images={images}
-        profiles={profiles}
-        abi="x86_64"
+        {...baseDeveloperProps}
+        ramMb={3072}
+        onRamMbChange={onRamMbChange}
+        diskGb={24}
+        onDiskGbChange={onDiskGbChange}
       />
     );
-    expect(screen.getByText(/arm64-v8a \(not x86_64/)).toBeInTheDocument();
+    expect(screen.getByText(/RAM: 3072 MB/)).toBeInTheDocument();
+    expect(screen.getByText(/Storage: 24 GB/)).toBeInTheDocument();
+
+    const sliders = screen.getAllByRole("slider");
+    fireEvent.change(sliders[0], { target: { value: "4096" } });
+    expect(onRamMbChange).toHaveBeenCalledWith(4096);
+    fireEvent.change(sliders[1], { target: { value: "32" } });
+    expect(onDiskGbChange).toHaveBeenCalledWith(32);
+  });
+
+  it("caps the RAM slider at half of detected host RAM", () => {
+    render(<CreateDeviceForm {...baseDeveloperProps} hostRamMb={16384} />);
+    const ramSlider = screen.getAllByRole("slider")[0] as HTMLInputElement;
+    expect(ramSlider.max).toBe("8192");
+  });
+
+  it("falls back to a conservative RAM cap when host RAM can't be detected", () => {
+    render(<CreateDeviceForm {...baseDeveloperProps} hostRamMb={null} />);
+    const ramSlider = screen.getAllByRole("slider")[0] as HTMLInputElement;
+    expect(ramSlider.max).toBe("8192");
   });
 });

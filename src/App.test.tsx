@@ -324,3 +324,42 @@ describe("App — dashboard polling", () => {
     vi.useRealTimers();
   });
 });
+
+describe("App — destructive actions use an in-app confirm dialog, not window.confirm", () => {
+  it("shows the dialog on Delete, and does nothing if Cancel is clicked", async () => {
+    mockBaseCommands();
+    render(<App />);
+    const deleteButton = await screen.findByRole("button", { name: "Delete" });
+    deleteButton.click();
+
+    expect(await screen.findByText(/Delete "dev1"\? This can't be undone\./)).toBeInTheDocument();
+    screen.getByRole("button", { name: "Cancel" }).click();
+
+    await waitFor(() => expect(screen.queryByText(/This can't be undone/)).not.toBeInTheDocument());
+    expect(mockedInvoke.mock.calls.some(([cmd]) => cmd === "delete_avd")).toBe(false);
+    // The device itself is untouched — Cancel must not have deleted anything.
+    expect(screen.getByText("dev1")).toBeInTheDocument();
+  });
+
+  it("actually deletes the device once Confirm is clicked", async () => {
+    mockBaseCommands();
+    render(<App />);
+    const deleteButton = await screen.findByRole("button", { name: "Delete" });
+    deleteButton.click();
+    await screen.findByText(/Delete "dev1"\? This can't be undone\./);
+
+    // A real device shouldn't vanish from the mock's own list until this
+    // point — simulates the backend genuinely deleting it, then the
+    // post-delete refresh() reflecting that.
+    mockedInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "delete_avd") return "Deleted dev1";
+      if (cmd === "list_avds") return [];
+      if (cmd === "list_running_avds") return [];
+      return null;
+    });
+    screen.getByRole("button", { name: "Confirm" }).click();
+
+    await waitFor(() => expect(mockedInvoke).toHaveBeenCalledWith("delete_avd", { name: "dev1" }));
+    await waitFor(() => expect(screen.queryByText("dev1")).not.toBeInTheDocument());
+  });
+});

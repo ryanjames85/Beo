@@ -33,7 +33,9 @@ type DiskSpaceStatus = { availableMb: number | null };
 // one phone with a single boot snapshot. This threshold is deliberately
 // conservative and informational, not a hard "will it fit" guarantee.
 const LOW_DISK_SPACE_MB = 8192;
-type FailedAction = { kind: "install" } | { kind: "create"; name: string; imageId: string; device: string };
+type FailedAction =
+  | { kind: "install" }
+  | { kind: "create"; name: string; imageId: string; device: string; ramMb?: number; diskGb?: number };
 
 const GITHUB_REPO = "ryanjames85/Beo";
 const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
@@ -231,6 +233,13 @@ export default function App() {
   const [newName, setNewName] = useState("");
   const [selectedImage, setSelectedImage] = useState("");
   const [device, setDevice] = useState("pixel_6");
+  // Defaults match create_avd's own backend defaults (see lifecycle.rs) —
+  // Developer mode's sliders start here rather than at some other value,
+  // so leaving them untouched produces the exact same device Simple mode
+  // would create.
+  const [ramMb, setRamMb] = useState(2048);
+  const [diskGb, setDiskGb] = useState(16);
+  const [hostRamMb, setHostRamMb] = useState<number | null>(null);
   const [playStore, setPlayStore] = useState(true);
   const [log, setLog] = useState<ReactNode>("");
   const [progress, setProgress] = useState<InstallProgress | null>(null);
@@ -252,6 +261,16 @@ export default function App() {
   const [newSnapshotName, setNewSnapshotName] = useState<Record<string, string>>({});
   const [snapshotBusy, setSnapshotBusy] = useState<string | null>(null);
   const [lastFailed, setLastFailed] = useState<FailedAction | null>(null);
+  // Replaces the browser's native confirm() popup for destructive actions
+  // (delete a device/snapshot, nuke all data, reset the app) with an
+  // in-app dialog matching Beo's own look — same OK/Cancel behavior, just
+  // styled consistently instead of the OS's generic alert box. `onConfirm`
+  // only runs if the user actually clicks through; Cancel (or dismissing
+  // it) just clears this state and does nothing.
+  const [confirmDialog, setConfirmDialog] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  function askConfirm(message: string, onConfirm: () => void) {
+    setConfirmDialog({ message, onConfirm });
+  }
   const [version, setVersion] = useState<string | null>(null);
   const [versionError, setVersionError] = useState(false);
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck>({ status: "idle" });
@@ -459,7 +478,7 @@ export default function App() {
     if (lastFailed.kind === "install") {
       await doInstallSdk();
     } else {
-      await createWithImage(lastFailed.name, lastFailed.imageId, lastFailed.device);
+      await createWithImage(lastFailed.name, lastFailed.imageId, lastFailed.device, lastFailed.ramMb, lastFailed.diskGb);
     }
   }
 
@@ -467,6 +486,12 @@ export default function App() {
     invoke<boolean>("sdk_status").then((ok) => setView(ok ? "dashboard" : "setup"));
     checkNetwork();
     checkJava();
+    // Total host RAM doesn't change during a session — fetched once here
+    // rather than on every dashboard poll — used only to bound Developer
+    // mode's RAM slider so it can't be dragged past what the host actually
+    // has (unlike disk space, RAM is genuinely reserved by the running
+    // emulator process, not just a soft heads-up).
+    invoke<number | null>("host_ram_mb").then(setHostRamMb);
     // No .catch() here previously meant a rejected getVersion() (unlikely,
     // but possible — an IPC hiccup, a stripped permission) left `version`
     // null forever with the "Check for updates" button silently disabled
@@ -634,7 +659,13 @@ export default function App() {
   // *downloadable*, not because it's already installed — sdkmanager has to
   // pull it down before avdmanager can point an AVD at it, or creation
   // fails with "Package path is not valid".
-  async function createWithImage(name: string, imageId: string, deviceProfile: string) {
+  async function createWithImage(
+    name: string,
+    imageId: string,
+    deviceProfile: string,
+    ramMb?: number,
+    diskGb?: number
+  ) {
     setCreating(true);
     logDebug(`Creating "${name}" with image ${imageId}, device ${deviceProfile}`);
     setProgress({ stage: "image", percent: null, detail: `Downloading ${imageId}…` });
@@ -650,14 +681,14 @@ export default function App() {
       await invoke("download_image", { imageId });
       logDebug(`Image ${imageId} downloaded`);
       setLog(<>Setting up {highlightName(name)}…</>);
-      await invoke("create_avd", { name, imageId, device: deviceProfile });
+      await invoke("create_avd", { name, imageId, device: deviceProfile, ramMb, diskGb });
       logDebug(`Device "${name}" created`);
       setLog("");
       setLastFailed(null);
       setNewName("");
       refresh();
     } catch (e) {
-      fail(`Create "${name}"`, e, { kind: "create", name, imageId, device: deviceProfile });
+      fail(`Create "${name}"`, e, { kind: "create", name, imageId, device: deviceProfile, ramMb, diskGb });
     } finally {
       unlisten?.();
       setCreating(false);
@@ -688,7 +719,7 @@ export default function App() {
       else if (containsBlockedWord(safeName)) setLog("That name isn't allowed — please choose something else.");
       return;
     }
-    await createWithImage(safeName, selectedImage, device);
+    await createWithImage(safeName, selectedImage, device, ramMb, diskGb);
   }
 
   async function doLaunch(name: string) {
@@ -851,18 +882,19 @@ export default function App() {
     }
   }
 
-  async function doDeleteSnapshot(name: string, snapName: string) {
-    if (!confirm(`Delete snapshot "${snapName}"? This can't be undone.`)) return;
-    setSnapshotBusy(name);
-    try {
-      await invoke("delete_snapshot", { name, snapshotName: snapName });
-      logDebug(`Deleted snapshot "${snapName}" for "${name}"`);
-      await refreshSnapshots(name);
-    } catch (e) {
-      fail(`Delete snapshot for "${name}"`, e);
-    } finally {
-      setSnapshotBusy(null);
-    }
+  function doDeleteSnapshot(name: string, snapName: string) {
+    askConfirm(`Delete snapshot "${snapName}"? This can't be undone.`, async () => {
+      setSnapshotBusy(name);
+      try {
+        await invoke("delete_snapshot", { name, snapshotName: snapName });
+        logDebug(`Deleted snapshot "${snapName}" for "${name}"`);
+        await refreshSnapshots(name);
+      } catch (e) {
+        fail(`Delete snapshot for "${name}"`, e);
+      } finally {
+        setSnapshotBusy(null);
+      }
+    });
   }
 
   async function doRotate(name: string) {
@@ -875,26 +907,28 @@ export default function App() {
     }
   }
 
-  async function doDelete(name: string) {
-    if (!confirm(`Delete "${name}"? This can't be undone.`)) return;
-    try {
-      await invoke("delete_avd", { name });
-      logDebug(`Deleted "${name}"`);
-      refresh();
-    } catch (e) {
-      fail(`Delete "${name}"`, e);
-    }
+  function doDelete(name: string) {
+    askConfirm(`Delete "${name}"? This can't be undone.`, async () => {
+      try {
+        await invoke("delete_avd", { name });
+        logDebug(`Deleted "${name}"`);
+        refresh();
+      } catch (e) {
+        fail(`Delete "${name}"`, e);
+      }
+    });
   }
 
-  async function doNuke() {
-    if (!confirm("This deletes the SDK, all system images, and all devices. Continue?")) return;
-    try {
-      await invoke("nuke_all");
-      logDebug("nuke_all completed");
-      setView("setup");
-    } catch (e) {
-      fail("Nuke", e);
-    }
+  function doNuke() {
+    askConfirm("This deletes the SDK, all system images, and all devices. Continue?", async () => {
+      try {
+        await invoke("nuke_all");
+        logDebug("nuke_all completed");
+        setView("setup");
+      } catch (e) {
+        fail("Nuke", e);
+      }
+    });
   }
 
   // Debug-only: a full reset back to a true first-launch state, for
@@ -904,20 +938,19 @@ export default function App() {
   // and reloads the page — nuke_all alone only clears device/SDK data and
   // keeps your settings, which is the right default for a real user but
   // not for testing first-run behavior.
-  async function doResetApp() {
-    if (
-      !confirm(
-        "This resets Beo completely — SDK, images, devices, and all saved settings — back to the welcome screen. Continue?"
-      )
-    )
-      return;
-    try {
-      await invoke("nuke_all");
-      localStorage.clear();
-      window.location.reload();
-    } catch (e) {
-      fail("Reset app", e);
-    }
+  function doResetApp() {
+    askConfirm(
+      "This resets Beo completely — SDK, images, devices, and all saved settings — back to the welcome screen. Continue?",
+      async () => {
+        try {
+          await invoke("nuke_all");
+          localStorage.clear();
+          window.location.reload();
+        } catch (e) {
+          fail("Reset app", e);
+        }
+      }
+    );
   }
 
   if (view === "checking") {
@@ -1188,6 +1221,11 @@ export default function App() {
           images={images}
           profiles={profiles}
           abi={abi}
+          ramMb={ramMb}
+          onRamMbChange={setRamMb}
+          hostRamMb={hostRamMb}
+          diskGb={diskGb}
+          onDiskGbChange={setDiskGb}
         />
       )}
 
@@ -1232,6 +1270,26 @@ export default function App() {
               : debugLog.map((e) => `[${e.time}] ${e.message}`).join("\n")}
           </pre>
         </section>
+      )}
+
+      {confirmDialog && (
+        <div className="confirm-overlay" onClick={() => setConfirmDialog(null)}>
+          <div className="confirm-dialog" onClick={(e) => e.stopPropagation()}>
+            <p>{confirmDialog.message}</p>
+            <div className="confirm-dialog-actions">
+              <button onClick={() => setConfirmDialog(null)}>Cancel</button>
+              <button
+                className="danger"
+                onClick={() => {
+                  confirmDialog.onConfirm();
+                  setConfirmDialog(null);
+                }}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

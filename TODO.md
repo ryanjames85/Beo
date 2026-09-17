@@ -1406,3 +1406,144 @@ found two things:
   but the full `toggle_avd_mute` round trip (mute, then unmute, on a real
   device) hasn't been re-verified live since. Don't consider this feature
   done until that happens.
+
+## Real bug found live: default 6G data partition leaves almost no free space (2026-09-16)
+User noticed images have so little storage that apps can't even update.
+Checked directly on a real running device rather than guessing:
+`df /data` showed **84% full — 4.9G of 6G used, ~1G free** — on a device
+that hadn't had anything installed or updated by the user yet; that's
+purely the Google Play image's own bundled apps and services. ~1G of real
+headroom isn't enough for Play Store's own update staging, which is
+exactly what "can't update the apps" looks like.
+- [x] Fixed the same way as the earlier RAM bump: `create_avd` now also
+      explicitly sets `disk.dataPartition.size = 16G` (avdmanager's own
+      default is 6G) for every device Beo creates. Chosen generously
+      rather than just-barely-enough (~11G free on top of the same
+      baseline footprint) since this is a dynamically-growing virtual
+      disk, not pre-allocated — a bigger ceiling costs no real host disk
+      upfront, actual usage still only ever reflects what's genuinely
+      stored. `cargo fmt`/`clippy -D warnings`/`cargo test` (36/36) all
+      clean.
+- Existing devices (created before this change) keep their original 6G
+  partition — this only affects newly created ones. Not retrofitted onto
+  `wow`/`mic_disable_test2`/etc.; recreate them if more headroom is
+  wanted on those specific throwaways.
+
+## New feature: RAM/storage sliders in Developer mode (2026-09-16)
+User asked for VirtualBox-style sliders to choose RAM/storage per device,
+rather than only the fixed defaults above. Scoped to Developer mode only —
+Simple mode's whole value is not needing to know what these numbers mean,
+so it keeps the fixed defaults (2048 MB / 16 GB) untouched.
+- [x] `create_avd` now takes optional `ramMb`/`diskGb` params (backend
+      default unchanged — `None` falls back to the same 2048/16
+      already-proven values), applied via the same `set_avd_config_value`
+      mechanism already proven live for those defaults. Existing callers
+      (Simple mode, the audio-test-suite scripts, e2e scripts) that don't
+      pass these keep working unchanged — Tauri deserializes a missing
+      optional field as `None`.
+- [x] New `host_ram_mb` command (`util.rs`) — Windows via
+      `Get-CimInstance Win32_ComputerSystem`, Linux via `/proc/meminfo`,
+      macOS via `sysctl hw.memsize` (same per-platform-command pattern as
+      the existing `check_disk_space`/`free_space_mb`). **Only the
+      Windows path has been verified live** (real command run directly,
+      matches this host's already-known 30.9GB) — macOS/Linux compile
+      (not exercised, cfg-gated out on this Windows machine, same
+      pre-existing limitation `free_space_mb` already has).
+- [x] RAM slider bounded at `[2048, max(2048, hostRam/2)]` — the 2048
+      floor matches the already-confirmed-crashes-below-this value from
+      the earlier bug; the host-RAM-based ceiling exists because (unlike
+      disk) RAM is genuinely reserved by the running emulator process, so
+      an unconstrained slider could let someone starve their own machine.
+      Falls back to a conservative 8192 MB ceiling if host RAM can't be
+      detected at all. Storage slider bounded `[6, 64]` GB (6 matching
+      avdmanager's own original default as a floor).
+- [x] New tests: `CreateDeviceForm.test.tsx` covers slider values,
+      change-callback wiring, RAM cap against detected host RAM, and the
+      fallback cap when host RAM is undetected. 62/62 frontend tests,
+      36/36 Rust tests, `tsc --noEmit`/clippy/fmt all clean.
+- **Not yet verified live end-to-end** — the user's own `cargo run` dev
+  session was active the whole time (same recurring constraint as
+  elsewhere in this project), so a real device hasn't actually been
+  created with a custom slider value and had its `config.ini` checked.
+  The mechanism is the same one already proven live for the fixed
+  defaults, but confirm this for real the next time a device gets created
+  with the sliders moved away from their defaults.
+
+## Confirmed live: RAM can be retrofitted onto existing devices, storage cannot (2026-09-16)
+User asked to fix the same RAM/storage limits on already-existing devices,
+not just new ones. Tested directly on a throwaway before touching any real
+device:
+- **RAM**: safe — `hw.ramSize` is a boot-time allocation with no
+  filesystem implications. Editing `config.ini` while the device is
+  stopped takes effect cleanly on next launch. [x] Bumped `tes3` and
+  `wow`'s `hw.ramSize` from 1536 to 2048 (the same crash-prone value the
+  earlier bug was found on). `Medium_Phone` was already at 2048.
+- **Storage cannot be safely grown in place — confirmed by direct test,
+  not assumption.** Bumped a throwaway's `disk.dataPartition.size` from
+  6G to 16G in `config.ini` after it had already booted once, rebooted it,
+  and checked `df /data`: **identical byte count before and after**
+  (6,082,144 1K-blocks both times). The actual partition file is
+  formatted at its declared size on *first* boot only; later boots don't
+  detect or apply a size increase. Growing an existing device's storage
+  for real would mean either wiping its data (same practical cost as
+  recreating it) or manually resizing the live filesystem image
+  (`qemu-img resize` plus an in-guest `resize2fs`-equivalent) — real,
+  non-trivial corruption risk for a convenience feature, not attempted.
+  **Not fixed on `tes3`/`wow`** — recreate them if more storage is wanted
+  on those specific devices.
+
+## Follow-up: Simple mode now gets a host-aware RAM default too (2026-09-16)
+Discussed whether 2048 MB is "enough in general" — it's the proven floor,
+not a generous number (real phones now ship with far more). User's call:
+check the host's real RAM and give Simple-mode devices more when the
+machine can spare it, without adding a Developer-only slider to Simple
+mode itself.
+- [x] New `recommended_ram_mb()` (`util.rs`): 4096 MB if host RAM is
+      16 GB+, otherwise the same proven 2048 MB floor (including when
+      host RAM can't be detected at all — never guess generous). Split
+      the actual threshold decision into a separate, pure
+      `ram_mb_for_host_total(Option<u64>)` so it's unit-testable without
+      depending on the real host's RAM — 5 new tests cover the floor,
+      right at the threshold, above it, and the undetected case.
+- [x] `create_avd` now falls back to `recommended_ram_mb()` instead of a
+      flat 2048 when no explicit `ramMb` is given — covers Simple mode
+      (no slider at all) and Developer mode before the slider is touched.
+      Developer mode's slider itself still starts at a fixed 2048 (a
+      predictable manual-control starting point) rather than the
+      host-aware value — this host-aware default is specifically for the
+      no-slider case.
+- [x] `cargo test` (41/41, up from 36), `clippy -D warnings`, `fmt` all
+      clean. Not re-verified through a live device creation this pass —
+      same recurring dev-session-build-lock constraint — but
+      `total_ram_mb()`'s Windows path was already confirmed live earlier
+      tonight (matches this host's known ~30.9GB), so the composed
+      `recommended_ram_mb()` should correctly land on 4096 here.
+
+## Replaced window.confirm() with an in-app styled dialog (2026-09-16)
+User asked for a confirmation on Delete — turned out one already existed
+(`window.confirm`, on device delete, snapshot delete, Nuke, and Reset app)
+but felt like it needed a real look, not the browser's generic popup.
+- [x] New `askConfirm(message, onConfirm)` + `confirmDialog` state
+      (`App.tsx`) replacing all four `confirm()` call sites — same
+      OK/Cancel behavior, styled to match Beo (`.confirm-overlay`/
+      `.confirm-dialog` in `style.css`, reusing the existing `.danger`
+      button style for the destructive Confirm action). Clicking outside
+      the dialog also cancels (the overlay's own `onClick`, stopped from
+      firing when the click originates inside the dialog itself).
+      `doDelete`/`doDeleteSnapshot`/`doNuke`/`doResetApp` all changed from
+      `async function` (blocking on the native `confirm()`) to plain
+      functions that schedule their real logic via `askConfirm` instead —
+      none of their callers awaited the return value, so this is a
+      behavior-preserving change.
+- [x] Two new tests (`App.test.tsx`) covering Delete specifically: the
+      dialog shows the right message and Cancel does nothing (no
+      `delete_avd` call, device still listed); Confirm actually calls
+      `delete_avd` and the device disappears from the list afterward.
+      **Real regression-testing catch while writing these**: the first
+      version of the Cancel test asserted synchronously right after
+      `.click()`, which failed — not an app bug, a test bug (missing
+      `waitFor`, unlike every other click-then-assert test in this file).
+      Fixed the test, then deliberately broke the real Cancel handler to
+      confirm the fixed test actually catches it (it did), reverted.
+- [x] 64/64 frontend tests (up from 62), 41/41 Rust (unaffected,
+      frontend-only change), `tsc --noEmit`/clippy/fmt all clean.
